@@ -1,0 +1,557 @@
+/* ==========================================
+GLOBAL STATES & INITIALIZATION
+========================================== */
+let chatHistory = JSON.parse(localStorage.getItem("dopilot_history")) || [];
+let currentUser = JSON.parse(localStorage.getItem("dopilot_user")) || null;
+let currentPendingAction = null; // Storing current pending task action
+
+window.onload = function () {
+    renderHistoryList();
+    updateNavUI();
+};
+
+/* ==========================================
+   PROMPT EXECUTION ENGINE
+========================================== */
+async function sendPrompt() {
+    const input = document.getElementById("userInput");
+    const status = document.getElementById("demoStatus");
+
+    if (!input || !status) {
+        console.error("HTML elements 'userInput' ya 'demoStatus' nahi mile!");
+        return;
+    }
+
+    const text = input.value.trim();
+
+    if (text === "") {
+        status.style.display = "block";
+        status.innerHTML = "<div class='glass-card'>⚠️ Please enter a prompt for DoPilot.</div>";
+        return;
+    }
+
+    status.style.display = "block";
+    status.innerHTML = "<div class='glass-card'>⏳ DoPilot is analyzing your task...</div>";
+
+    try {
+        const response = await fetch("http://127.0.0.1:5000/api/execute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                prompt: text,
+                user_id: currentUser ? currentUser.email : null,
+                history: chatHistory || []
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            // Smart History Entry Generation
+            let historyText = data.result || data.message;
+            if (data.tool_name === "gmail_automation" && data.result && data.result.target_person) {
+                historyText = `Gmail Task Processed for '${data.result.target_person}'`;
+            }
+
+            chatHistory.push({ sender: "user", text: text });
+            chatHistory.push({ sender: "model", text: typeof historyText === "string" ? historyText : "Task Executed" });
+            localStorage.setItem("dopilot_history", JSON.stringify(chatHistory));
+            renderHistoryList();
+
+            displayAIResponse(data, status);
+            input.value = "";
+        } else {
+            status.innerHTML = "<div class='glass-card'>❌ Error: " + escapeHTML(data.message) + "</div>";
+        }
+
+    } catch (error) {
+        console.error("Backend Error:", error);
+        status.innerHTML =
+            "<div class='glass-card'>❌ Could not connect to Python Server.<br>Make sure 'python app.py' terminal me chal raha hai.</div>";
+    }
+}
+
+function displayAIResponse(data, statusElement) {
+    // CASE 1: GMAIL AUTOMATION TOOL DETECTED
+    if (data.tool_name === "gmail_automation") {
+        const res = data.result;
+
+        if (res && res.status === "success") {
+            statusElement.innerHTML = `
+                <div class="glass-card" style="margin-top: 10px; text-align: left; background: #0f172a; border-radius: 12px; padding: 18px; color: #F8FAFC; border: 1px solid #3b82f6;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155; padding-bottom: 10px;">
+                        <h4 style="margin: 0; color: #38BDF8;">📧 Target Email Detected</h4>
+                        <span style="background: #10B981; color: #000; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold;">Gmail Active</span>
+                    </div>
+
+                    <div style="margin-top: 12px;">
+                        <p style="margin: 4px 0; font-size: 0.9rem;"><strong>Sender:</strong> <span style="color: #94A3B8;">${escapeHTML(res.target_person)}</span></p>
+                        <p style="margin: 4px 0; font-size: 0.9rem;"><strong>Subject:</strong> <span style="color: #94A3B8;">${escapeHTML(res.subject)}</span></p>
+                        <div style="background: #1e293b; padding: 10px; border-radius: 6px; font-size: 0.85rem; color: #CBD5E1; margin-top: 8px; border: 1px solid #334155;">
+                            "${escapeHTML(res.snippet)}"
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 14px;">
+                        <h5 style="color: #F59E0B; margin: 0 0 6px 0; font-size: 0.9rem;">🤖 Proposed AI Response:</h5>
+                        <textarea id="emailMessage" style="width: 100%; height: 75px; background: #1e293b; color: #F8FAFC; border: 1px solid #475569; border-radius: 6px; padding: 8px; font-family: inherit; resize: vertical;">${res.proposed_reply}</textarea>
+                    </div>
+
+                    <button onclick="sendDirectEmail('${escapeHTML(res.target_person)}', '${escapeHTML(res.subject)}')" style="margin-top: 12px; width: 100%; background: #2563EB; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s;">
+                        🚀 Confirm & Send Email Now
+                    </button>
+                </div>
+            `;
+        } else {
+            statusElement.innerHTML = `<div class='glass-card' style='color: #EF4444;'>❌ ${escapeHTML(res ? res.message : "Email fetch failed")}</div>`;
+        }
+        return;
+    }
+
+    // CASE 2: NORMAL RESPONSE TEXT
+    let resultText = data.result || (data.parsed_action ? data.parsed_action.message : "Task analyzed successfully.");
+    
+    let messageHTML = `
+        🚀 <strong>DoPilot Response:</strong>
+        <div class='glass-card' style="margin-top: 6px;">
+            ${escapeHTML(resultText)}
+        </div>
+    `;
+
+    // CASE 3: ACTION REQUIRED -> WEB AUTOMATION APPROVAL CARD
+    if (data.action_required && data.parsed_action) {
+        const action = data.parsed_action;
+        currentPendingAction = action; // Save state for execution
+
+        let paramsHtml = "";
+        if (action.parameters && Array.isArray(action.parameters)) {
+            paramsHtml = action.parameters.map(param => `
+                <div style="display:flex; justify-content:space-between; margin-bottom: 4px; font-size: 0.85rem;">
+                    <span style="color: #94a3b8; font-weight: 500;">${escapeHTML(param.label)}:</span>
+                    <span style="color: #f1f5f9; font-weight: 600;">${escapeHTML(param.value)}</span>
+                </div>
+            `).join('');
+        }
+
+        messageHTML += `
+            <div class="action-card" id="activeActionCard" style="margin-top: 15px; padding: 16px; border: 1px solid #3b82f6; border-radius: 10px; background: #0f172a; text-align: left;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <span style="background: #1e1b4b; color: #818cf8; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; border: 1px solid #3730a3;">
+                        ⚡ ${escapeHTML(action.tool_name || 'System Automation')}
+                    </span>
+                    <span id="cardStatusBadge" style="background: #451a03; color: #fbbf24; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
+                        Pending Approval
+                    </span>
+                </div>
+
+                <h4 style="margin: 0 0 10px 0; color: #f8fafc; font-size: 0.95rem;">${escapeHTML(action.action_title || 'Task Execution Plan')}</h4>
+                
+                <div style="background: #1e293b; padding: 10px; border-radius: 6px; margin-bottom: 12px;">
+                    ${paramsHtml}
+                </div>
+
+                <div id="cardActionsGroup" style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button onclick="cancelAction()" style="background: #475569; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer;">
+                        ✕ Cancel
+                    </button>
+                    <button onclick="approveAction()" style="background: #16a34a; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer;">
+                        ✓ Approve & Execute
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    statusElement.innerHTML = messageHTML;
+}
+
+/* ==========================================
+   REAL-TIME ACTION EXECUTOR (WEB AUTOMATION)
+========================================== */
+async function approveAction() {
+    const badge = document.getElementById("cardStatusBadge");
+    const actionsGroup = document.getElementById("cardActionsGroup");
+
+    if (badge) {
+        badge.style.background = "#1e3a8a";
+        badge.style.color = "#93c5fd";
+        badge.innerText = "Running... ⏳";
+    }
+
+    if (actionsGroup) {
+        actionsGroup.innerHTML = `<span style="color: #60a5fa;">Capturing Live Screenshot...</span>`;
+    }
+
+    try {
+        const response = await fetch("http://127.0.0.1:5000/api/execute-task", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(currentPendingAction || {})
+        });
+
+        const resData = await response.json();
+
+        if (resData.success) {
+            if (badge) {
+                badge.style.background = "#064e3b";
+                badge.style.color = "#34d399";
+                badge.innerText = "Completed ✓";
+            }
+            
+            if (actionsGroup) {
+                actionsGroup.innerHTML = `
+                    <div style="width: 100%; margin-top: 10px;">
+                        <div style="color: #34d399; font-weight: 600; margin-bottom: 8px;">
+                            ✅ Live Browser Result:
+                        </div>
+                        <div style="border: 2px solid #334155; border-radius: 8px; overflow: hidden;">
+                            <img src="${resData.screenshot}" alt="Browser Screenshot" style="width: 100%; height: auto; display: block;" />
+                        </div>
+                    </div>
+                `;
+            }
+        } else {
+            throw new Error(resData.error || "Execution failed");
+        }
+    } catch (err) {
+        if (badge) {
+            badge.style.background = "#831843";
+            badge.innerText = "Failed ❌";
+        }
+        if (actionsGroup) {
+            actionsGroup.innerHTML = `<span style="color: #f87171;">Error: ${err.message}</span>`;
+        }
+    }
+}
+
+function cancelAction() {
+    const badge = document.getElementById("cardStatusBadge");
+    const actionsGroup = document.getElementById("cardActionsGroup");
+
+    if (badge) {
+        badge.style.background = "#4c0519";
+        badge.style.color = "#f87171";
+        badge.innerText = "Cancelled";
+    }
+
+    if (actionsGroup) {
+        actionsGroup.innerHTML = `<span style="color: #f87171; font-weight: 600; font-size: 0.85rem;">Task Cancelled</span>`;
+    }
+}
+
+/* ==========================================
+   DIRECT GMAIL DISPATCHER
+========================================== */
+async function sendDirectEmail(toEmail, subject) {
+    const bodyText = document.getElementById("emailMessage").value;
+    const status = document.getElementById("demoStatus");
+    
+    try {
+        const res = await fetch("http://127.0.0.1:5000/api/send-email", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ to_email: toEmail, subject: subject, body: bodyText })
+        });
+        const data = await res.json();
+        
+        if (data.status === "success") {
+            alert("✅ Email Sent Successfully!");
+            if (status) {
+                status.innerHTML = `<div class='glass-card' style='color: #10B981;'>✅ Email sent successfully to ${escapeHTML(toEmail)}!</div>`;
+            }
+        } else {
+            alert("❌ Failed to send email: " + (data.error || "Unknown error"));
+        }
+    } catch (err) {
+        alert("❌ Network Error: Server unreachable.");
+    }
+}
+
+/* ==========================================
+   CHAT HISTORY & SIDEBAR MANAGER
+========================================== */
+function renderHistoryList() {
+    const listDiv = document.getElementById("historyList");
+    if (!listDiv) return;
+    listDiv.innerHTML = "";
+
+    chatHistory.filter(msg => msg.sender === "user").forEach(msg => {
+        const item = document.createElement("div");
+        item.className = "history-item";
+        item.innerText = "💬 " + msg.text;
+        listDiv.appendChild(item);
+    });
+}
+
+function clearHistory() {
+    chatHistory = [];
+    localStorage.removeItem("dopilot_history");
+    renderHistoryList();
+    const status = document.getElementById("demoStatus");
+    if (status) status.innerHTML = "<div class='glass-card'>Started a fresh new conversation!</div>";
+}
+
+/* ==========================================
+   AUTHENTICATION & MODAL CONTROLLER
+========================================== */
+function openAuthModal(mode) {
+    const modal = document.getElementById("authModal");
+    if (modal) {
+        modal.style.display = "flex";
+        toggleAuthMode(mode);
+    }
+}
+
+function closeAuthModal() {
+    const modal = document.getElementById("authModal");
+    if (modal) {
+        modal.style.display = "none";
+        clearAuthAlert();
+    }
+}
+
+function toggleAuthMode(mode) {
+    const loginBox = document.getElementById("loginFormContainer");
+    const signupBox = document.getElementById("signupFormContainer");
+    clearAuthAlert();
+
+    if (mode === "login") {
+        loginBox.style.display = "block";
+        signupBox.style.display = "none";
+    } else {
+        loginBox.style.display = "none";
+        signupBox.style.display = "block";
+    }
+}
+
+function showAuthAlert(msg, isError = true) {
+    const alertBox = document.getElementById("authAlert");
+    if (alertBox) {
+        alertBox.style.color = isError ? "#f87171" : "#4ade80";
+        alertBox.innerText = msg;
+    }
+}
+
+function clearAuthAlert() {
+    const alertBox = document.getElementById("authAlert");
+    if (alertBox) alertBox.innerText = "";
+}
+
+async function handleLogin() {
+    const email = document.getElementById("loginEmail").value.trim();
+    const password = document.getElementById("loginPassword").value;
+
+    if (!email || !password) {
+        showAuthAlert("Please enter both email and password.");
+        return;
+    }
+
+    try {
+        const response = await fetch("http://127.0.0.1:5000/api/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: email, password: password })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            currentUser = data.user;
+            localStorage.setItem("dopilot_user", JSON.stringify(currentUser));
+            showAuthAlert("Login Successful!", false);
+            setTimeout(() => {
+                closeAuthModal();
+                updateNavUI();
+            }, 1000);
+        } else {
+            showAuthAlert(data.message || "Invalid credentials.");
+        }
+    } catch (err) {
+        console.error(err);
+        showAuthAlert("Could not connect to Python backend.");
+    }
+}
+
+async function handleSignup() {
+    const name = document.getElementById("signupName").value.trim();
+    const email = document.getElementById("signupEmail").value.trim();
+    const password = document.getElementById("signupPassword").value;
+
+    if (!name || !email || !password) {
+        showAuthAlert("All fields are required.");
+        return;
+    }
+
+    try {
+        const response = await fetch("http://127.0.0.1:5000/api/signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name, email: email, password: password })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            showAuthAlert("Account created! Switching to Login...", false);
+            setTimeout(() => {
+                toggleAuthMode("login");
+                document.getElementById("loginEmail").value = email;
+            }, 1500);
+        } else {
+            showAuthAlert(data.message || "Signup failed.");
+        }
+    } catch (err) {
+        console.error(err);
+        showAuthAlert("Could not connect to Python backend.");
+    }
+}
+
+function handleLogout() {
+    currentUser = null;
+    localStorage.removeItem("dopilot_user");
+    updateNavUI();
+}
+
+/* ==========================================
+   PROFILE DROPDOWN & NAV UI CONTROLLER
+========================================== */
+function toggleProfileDropdown(event) {
+    event.stopPropagation();
+    const dropdown = document.getElementById("profileDropdown");
+    if (dropdown) {
+        dropdown.classList.toggle("show");
+    }
+}
+
+window.addEventListener("click", function () {
+    const dropdown = document.getElementById("profileDropdown");
+    if (dropdown && dropdown.classList.contains("show")) {
+        dropdown.classList.remove("show");
+    }
+});
+
+function updateNavUI() {
+    const navContainer = document.getElementById("authNavContainer");
+    if (!navContainer) return;
+
+    if (currentUser) {
+        navContainer.innerHTML = `
+            <div class="profile-menu-container">
+                <div class="profile-badge" onclick="toggleProfileDropdown(event)">
+                    <span>👤 ${escapeHTML(currentUser.name || 'User')}</span>
+                    <span style="font-size: 0.7rem; color: #94a3b8;">▼</span>
+                </div>
+                
+                <div class="profile-dropdown" id="profileDropdown">
+                    <button onclick="openProfileSettings()">
+                        ✏️ Edit Profile
+                    </button>
+                    <button onclick="selectPlan('Pro Plan')">
+                        ⚡ Upgrade Plan
+                    </button>
+                    <button class="logout-btn" onclick="handleLogout()">
+                        🚪 Logout
+                    </button>
+                </div>
+            </div>
+        `;
+    } else {
+        navContainer.innerHTML = `
+            <button class="btn-header" style="background: transparent; border: 1px solid #334155; color: #f8fafc;" onclick="openAuthModal('login')">
+                Login / Sign Up
+            </button>
+        `;
+    }
+}
+
+function openProfileSettings() {
+    alert("Edit profile feature coming soon!");
+}
+
+/* ==========================================
+   UI HELPERS & UTILITIES
+========================================== */
+function handleEnter(event) {
+    if (event.key === "Enter") {
+        sendPrompt();
+    }
+}
+
+function scrollToPrompt() {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    setTimeout(function () {
+        const input = document.getElementById("userInput");
+        if (input) input.focus();
+    }, 600);
+}
+
+if ('scrollRestoration' in history) {
+    history.scrollRestoration = 'manual';
+}
+
+window.addEventListener('beforeunload', function () {
+    window.scrollTo(0, 0);
+});
+
+const useCasesData = {
+    email: {
+        title: "Email Automation",
+        desc: '"Summarize important emails and prepare replies for my approval."'
+    },
+    research: {
+        title: "Research Automation",
+        desc: '"Research a topic, collect useful information and create a structured summary."'
+    },
+    data: {
+        title: "Data Processing",
+        desc: '"Take information from multiple sources and organize it into a structured dataset."'
+    },
+    automation: {
+        title: "Workflow Automation",
+        desc: '"When a new customer submits a form, process the information and trigger the required workflow."'
+    }
+};
+
+function showUseCase(key, element) {
+    const buttons = document.querySelectorAll(".tab-btn");
+    buttons.forEach(function (button) {
+        button.classList.remove("active");
+    });
+
+    element.classList.add("active");
+
+    const box = document.getElementById("usecase-box");
+    if (box && useCasesData[key]) {
+        box.innerHTML = `
+            <h4>${escapeHTML(useCasesData[key].title)}</h4>
+            <p>${escapeHTML(useCasesData[key].desc)}</p>
+        `;
+    }
+}
+
+function selectPlan(planName) {
+    alert(
+        "You selected the " + planName + " plan.\n\n" +
+        "DoPilot is currently in concept/MVP development."
+    );
+}
+
+function escapeHTML(text) {
+    if (!text) return "";
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function togglePasswordVisibility(inputId, btn) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+
+    if (input.type === "password") {
+        input.type = "text";
+        btn.innerText = "🙈";
+    } else {
+        input.type = "password";
+        btn.innerText = "👁️";
+    }
+}

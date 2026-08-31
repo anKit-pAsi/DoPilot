@@ -1,0 +1,8 @@
+Api.env
+fresh_env/
+token.json
+*.env
+__pycache__/
+*.pyc
+credentials.json
+*.db

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="DoPilot - AI that turns your instructions into real digital actions.">
+
+    <title>DoPilot - Say It. Get It Done.</title>
+
+    <!-- Favicon -->
+    <link rel="shortcut icon" href="DoPilot.png" type="image/png">
+
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Google Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <script src="script.js"></script>
+</head>
+
+<body>
+
+    <div class="app-layout">
+        <!-- Left Sidebar: Saved Chats & Controls -->
+        <div class="sidebar glass-panel">
+            <button class="new-chat-btn" onclick="clearHistory()">+ New Chat</button>
+            <h3>Chat History</h3>
+            <div id="historyList" class="history-list">
+                <!-- Saved topics yahan dikhenge -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Background Glow -->
+    <div class="bg-glow-1"></div>
+
+    <!-- =========================
+         HEADER
+    ========================== -->
+
+    <header>
+        <div class="logo-container">
+            <a href="#home">
+                <img src="DoPilot.png" alt="DoPilot Logo">
+            </a>
+        </div>
+
+        <nav>
+            <a href="#how-it-works">How It Works</a>
+            <a href="#use-cases">Use Cases</a>
+            <a href="#vision">Vision</a>
+            <a href="#pricing">Pricing</a>
+        </nav>
+
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <!-- Dynamic Auth Button / User Profile -->
+            <div id="authNavContainer">
+                <button class="btn-header" style="background: transparent; border: 1px solid #334155; color: #f8fafc;" onclick="openAuthModal('login')">
+                    Login / Sign Up
+                </button>
+            </div>
+
+            <button class="btn-header" onclick="scrollToPrompt()">
+                Try Demo
+            </button>
+        </div>
+    </header>
+
+
+    <!-- =========================
+         HERO
+    ========================== -->
+
+    <section class="hero" id="home">
+        <div class="badge">
+            AI EXECUTION PLATFORM · CONCEPT STAGE
+        </div>
+
+        <h1>
+            Say It.
+            <br>
+            <span class="gradient-text">Get It Done.</span>
+        </h1>
+
+        <p>
+            Tell DoPilot what you want to accomplish.
+            DoPilot is being built to understand your goal,
+            plan the steps, and execute digital tasks for you.
+        </p>
+
+        <!-- Prompt Input -->
+        <div class="input-container">
+            <input 
+                type="text" 
+                id="userInput" 
+                placeholder="Tell DoPilot what you want to do..." 
+                onkeydown="handleEnter(event)"
+            >
+
+            <button class="send-btn" onclick="sendPrompt()">
+                Execute 🚀
+            </button>
+        </div>
+
+        <!-- Demo Status Output -->
+        <div class="demo-status" id="demoStatus"></div>
+    </section>
+
+
+    <!-- =========================
+         HOW IT WORKS
+    ========================== -->
+
+    <section class="section-container" id="how-it-works">
+        <h2 class="section-title">How It Works</h2>
+        <p class="section-desc">One simple interface for digital execution.</p>
+
+        <div class="steps-grid">
+            <div class="step-card">
+                <div class="step-num">STEP 01</div>
+                <h3>Describe</h3>
+                <p>Tell DoPilot what outcome you want using normal language. No complicated workflows or technical commands.</p>
+            </div>
+
+            <div class="step-card">
+                <div class="step-num">STEP 02</div>
+                <h3>Understand & Plan</h3>
+                <p>DoPilot interprets your request and creates a sequence of actions required to accomplish the task.</p>
+            </div>
+
+            <div class="step-card">
+                <div class="step-num">STEP 03</div>
+                <h3>Execute</h3>
+                <p>Connected services and APIs perform the required actions. Sensitive actions can require your approval.</p>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- =========================
+         USE CASES
+    ========================== -->
+
+    <section class="section-container" id="use-cases">
+        <h2 class="section-title">Use Cases</h2>
+        <p class="section-desc">Examples of what DoPilot aims to automate.</p>
+
+        <div class="usecase-tabs">
+            <button class="tab-btn active" onclick="showUseCase('email', this)">Email</button>
+            <button class="tab-btn" onclick="showUseCase('research', this)">Research</button>
+            <button class="tab-btn" onclick="showUseCase('data', this)">Data</button>
+            <button class="tab-btn" onclick="showUseCase('automation', this)">Automation</button>
+        </div>
+
+        <div class="usecase-content" id="usecase-box">
+            <h4>Email Automation</h4>
+            <p>"Summarize my important emails and prepare replies for my approval."</p>
+        </div>
+    </section>
+
+
+    <!-- =========================
+         VISION
+    ========================== -->
+
+    <section class="section-container" id="vision">
+        <h2 class="section-title">The Vision</h2>
+        <p class="section-desc">From AI that answers to AI that executes.</p>
+
+        <div class="vision-box">
+            <h3>One interface. Many digital services.</h3>
+            <p>
+                The long-term vision of DoPilot is to make digital work as simple as describing what you want. 
+                Instead of manually switching between different applications, users could give one instruction 
+                and let an AI execution layer coordinate the required services.
+            </p>
+        </div>
+    </section>
+
+
+    <!-- =========================
+         PRICING
+    ========================== -->
+
+    <section class="section-container" id="pricing">
+        <h2 class="section-title">Simple Pricing</h2>
+        <p class="section-desc">Early concept pricing — subject to validation.</p>
+
+        <div class="pricing-grid">
+            <div class="price-card">
+                <div class="price-title">Starter</div>
+                <div class="price-val">₹0</div>
+                <button class="price-btn" onclick="selectPlan('Starter')">Get Started</button>
+            </div>
+
+            <div class="price-card popular">
+                <div class="price-title">Pro</div>
+                <div class="price-val">₹999</div>
+                <button class="price-btn" onclick="selectPlan('Pro')">Join Waitlist</button>
+            </div>
+
+            <div class="price-card">
+                <div class="price-title">Business</div>
+                <div class="price-val">Custom</div>
+                <button class="price-btn" onclick="selectPlan('Business')">Contact Us</button>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- =========================
+         WAITLIST
+    ========================== -->
+
+    <section class="waitlist">
+        <h2>Be first to try DoPilot.</h2>
+        <p>We're building the first version step by step.</p>
+        <a href="mailto:build@dopilot.ai?subject=DoPilot%20Waitlist" class="waitlist-btn">
+            Join the Waitlist
+        </a>
+    </section>
+
+
+    <!-- =========================
+         AUTH POPUP MODAL
+    ========================== -->
+
+    <div id="authModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.75); backdrop-filter: blur(8px); z-index: 9999; align-items: center; justify-content: center;">
+        <div style="background: #0f172a; border: 1px solid #334155; border-radius: 16px; width: 100%; max-width: 380px; padding: 28px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); position: relative; color: white;">
+            
+ <!-- Close Modal Button -->
+<button onclick="closeAuthModal()" style="position: absolute; top: 16px; right: 16px; background: transparent; border: none; color: #94a3b8; font-size: 1.2rem; cursor: pointer;">✕</button>
+
+<!-- LOGIN CONTAINER -->
+<div id="loginFormContainer">
+    <h3 style="margin: 0 0 6px 0; font-size: 1.4rem; color: #f8fafc;">Welcome Back</h3>
+    <p style="margin: 0 0 20px 0; font-size: 0.85rem; color: #94a3b8;">Log in to access your DoPilot execution workspace.</p>
+
+    <div style="margin-bottom: 12px;">
+        <label style="display: block; font-size: 0.8rem; color: #cbd5e1; margin-bottom: 4px;">Email Address</label>
+        <input type="email" id="loginEmail" placeholder="name@company.com" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: white; outline: none; box-sizing: border-box;">
+    </div>
+
+    <!-- LOGIN PASSWORD FIELD -->
+    <div style="margin-bottom: 20px;">
+        <label style="display: block; font-size: 0.8rem; color: #cbd5e1; margin-bottom: 4px;">Password</label>
+        <div style="position: relative; width: 100%;">
+            <input type="password" id="loginPassword" placeholder="Enter Password" style="width: 100%; padding: 10px 40px 10px 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: white; outline: none; box-sizing: border-box;">
+            <button type="button" onclick="togglePasswordVisibility('loginPassword', this)" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: transparent; border: none; color: #94a3b8; cursor: pointer; font-size: 1rem;">👁️</button>
+        </div>
+    </div>
+
+    <button onclick="handleLogin()" style="width: 100%; padding: 12px; background: #2563eb; color: white; border: none; font-weight: 600; border-radius: 8px; cursor: pointer;">Log In</button>
+            
+    <p style="font-size: 0.85rem; margin-top: 16px; text-align: center; color: #94a3b8;">
+        Don't have an account? <a href="javascript:void(0)" onclick="toggleAuthMode('signup')" style="color: #38bdf8; text-decoration: none; font-weight: 600;">Sign Up</a>
+    </p>
+</div>
+
+<!-- SIGNUP CONTAINER -->
+<div id="signupFormContainer" style="display: none;">
+    <h3 style="margin: 0 0 6px 0; font-size: 1.4rem; color: #f8fafc;">Create Account</h3>
+    <p style="margin: 0 0 20px 0; font-size: 0.85rem; color: #94a3b8;">Start automating your digital tasks with DoPilot.</p>
+
+    <div style="margin-bottom: 12px;">
+        <label style="display: block; font-size: 0.8rem; color: #cbd5e1; margin-bottom: 4px;">Full Name</label>
+        <input type="text" id="signupName" placeholder="Alvia Calson" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: white; outline: none; box-sizing: border-box;">
+    </div>
+
+    <div style="margin-bottom: 12px;">
+        <label style="display: block; font-size: 0.8rem; color: #cbd5e1; margin-bottom: 4px;">Email Address</label>
+        <input type="email" id="signupEmail" placeholder="name@company.com" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: white; outline: none; box-sizing: border-box;">
+    </div>
+
+    <!-- SIGNUP PASSWORD FIELD -->
+    <div style="margin-bottom: 20px;">
+        <label style="display: block; font-size: 0.8rem; color: #cbd5e1; margin-bottom: 4px;">Password</label>
+        <div style="position: relative; width: 100%;">
+            <input type="password" id="signupPassword" placeholder="••••••••" style="width: 100%; padding: 10px 40px 10px 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: white; outline: none; box-sizing: border-box;">
+            <button type="button" onclick="togglePasswordVisibility('signupPassword', this)" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: transparent; border: none; color: #94a3b8; cursor: pointer; font-size: 1rem;">👁️</button>
+        </div>
+    </div>
+
+    <button onclick="handleSignup()" style="width: 100%; padding: 12px; background: #16a34a; color: white; border: none; font-weight: 600; border-radius: 8px; cursor: pointer;">Create Account</button>
+            
+    <p style="font-size: 0.85rem; margin-top: 16px; text-align: center; color: #94a3b8;">
+        Already registered? <a href="javascript:void(0)" onclick="toggleAuthMode('login')" style="color: #38bdf8; text-decoration: none; font-weight: 600;">Log In</a>
+    </p>
+</div>
+
+<!-- Auth Error / Success Message Alert -->
+<div id="authAlert" style="margin-top: 12px; font-size: 0.85rem; text-align: center;"></div>
+
+
+    <!-- =========================
+         FOOTER
+    ========================== -->
+
+    <footer>
+        <p>© 2026 DoPilot. Built for digital execution.</p>
+    </footer>
+
+</body>
+
+</html>
