@@ -1,37 +1,218 @@
-/* ==========================================
-GLOBAL STATES & INITIALIZATION
+﻿/* ==========================================
+    GLOBAL STATES & INITIALIZATION
 ========================================== */
 let chatHistory = JSON.parse(localStorage.getItem("dopilot_history")) || [];
 let currentUser = JSON.parse(localStorage.getItem("dopilot_user")) || null;
-let currentPendingAction = null; // Storing current pending task action
+let currentPendingAction = null;
 
-window.onload = function () {
+document.addEventListener('DOMContentLoaded', () => {
     renderHistoryList();
     updateNavUI();
-};
+    initAutoResizeTextarea();
+    
+    // Har 15 Seconds me Unread Incoming Emails check honge
+    // setInterval(checkForIncomingEmails, 15000);
+});
 
 /* ==========================================
-   PROMPT EXECUTION ENGINE
+    UI HELPER FUNCTIONS (Try Demo, Use Cases, Pricing)
+========================================== */
+function scrollToPrompt() {
+    const input = document.getElementById("userInput");
+    if (input) {
+        input.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(() => input.focus(), 500); 
+    }
+}
+
+function selectPlan(planName) {
+    alert(`🚀 Thanks for choosing the ${planName}! This feature is in early development. Waitlist functionality coming soon.`);
+}
+
+const useCaseData = {
+    email: '"Summarize my important emails and prepare replies for my approval."',
+    research: '"Find the top 5 competitors in the AI agent space and create a comparison table."',
+    data: '"Extract all invoice amounts from these attached PDFs and put them into a Google Sheet."',
+    automation: '"When someone fills out my website form, add them to Mailchimp and send a welcome email."'
+};
+
+const useCaseTitles = {
+    email: 'Email Automation',
+    research: 'Deep Research',
+    data: 'Data Extraction',
+    automation: 'Workflow Automation'
+};
+
+function showUseCase(type, btnElement) {
+    const allTabs = document.querySelectorAll('.tab-btn');
+    allTabs.forEach(tab => tab.classList.remove('active'));
+    btnElement.classList.add('active');
+
+    const contentBox = document.getElementById('usecase-box');
+    if (contentBox) {
+        contentBox.innerHTML = `
+            <h4>${useCaseTitles[type]}</h4>
+            <p>${useCaseData[type]}</p>
+        `;
+    }
+}
+
+/* ==========================================
+    DYNAMIC TEXTAREA AUTO-RESIZE & ENTER KEY
+========================================== */
+function initAutoResizeTextarea() {
+    const userInput = document.getElementById("userInput");
+    if (userInput) {
+        userInput.addEventListener("input", autoResizeInput);
+    }
+}
+
+function autoResizeInput() {
+    const userInput = document.getElementById("userInput");
+    if (userInput) {
+        userInput.style.height = "auto";
+        userInput.style.height = userInput.scrollHeight + "px";
+        
+        if (userInput.scrollHeight > 250) {
+            userInput.classList.add("overflow-active");
+        } else {
+            userInput.classList.remove("overflow-active");
+        }
+    }
+}
+
+function handleEnter(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendPrompt();
+    }
+}
+
+/* ==========================================
+    REAL-TIME INCOMING EMAIL WATCHER
+========================================== */
+async function checkForIncomingEmails() {
+    if (!currentUser || !currentUser.email) return;
+
+    try {
+        const response = await fetch("http://127.0.0.1:5000/api/check-email-notifications", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ user_email: currentUser.email })
+        });
+        const res = await response.json();
+
+        if (res.success && res.has_notification) {
+            renderEmailApprovalCard(res.data);
+        }
+    } catch (err) {
+        // Background polling silent check
+    }
+}
+
+function renderEmailApprovalCard(emailData) {
+    const statusElement = document.getElementById("demoStatus");
+    if (!statusElement) return;
+
+    statusElement.style.display = "block";
+    
+    statusElement.innerHTML = `
+        <div class="action-card" id="incomingEmailCard" style="margin-top: 15px; padding: 18px; border: 1px solid #3b82f6; border-radius: 12px; background: #0f172a; text-align: left; box-shadow: 0 10px 30px rgba(59, 130, 246, 0.25);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #1e293b; padding-bottom: 8px;">
+                <span style="background: #1e1b4b; color: #818cf8; padding: 4px 10px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; border: 1px solid #3730a3;">
+                    📧 New Email Received
+                </span>
+                <span style="background: #065f46; color: #34d399; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
+                    AI Friendly Reply Ready
+                </span>
+            </div>
+
+            <div style="margin-bottom: 10px;">
+                <p style="margin: 2px 0; font-size: 0.9rem; color: #f8fafc;"><strong>From:</strong> ${escapeHTML(emailData.sender)} (${escapeHTML(emailData.email)})</p>
+                <p style="margin: 2px 0; font-size: 0.9rem; color: #38bdf8;"><strong>Subject:</strong> ${escapeHTML(emailData.subject)}</p>
+            </div>
+
+            <div style="background: #1e293b; padding: 10px; border-radius: 6px; font-size: 0.85rem; color: #cbd5e1; margin-bottom: 12px; border: 1px solid #334155;">
+                "${escapeHTML(emailData.snippet)}"
+            </div>
+
+            <div style="margin-bottom: 12px;">
+                <label style="color: #fbbf24; font-size: 0.85rem; font-weight: 600; display: block; margin-bottom: 4px;">
+                    🤖 Proposed Friendly Reply (Editable):
+                </label>
+                <textarea id="autoEmailReplyText" style="width: 100%; height: 80px; background: #0f172a; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 8px; font-family: inherit; font-size: 0.9rem; resize: vertical;">${escapeHTML(emailData.proposed_reply)}</textarea>
+            </div>
+
+            <div id="emailCardActions" style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button onclick="dismissEmailCard()" style="background: #475569; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer;">
+                    ✕ Ignore
+                </button>
+                <button onclick="approveAndSendEmail('${escapeHTML(emailData.email)}', '${escapeHTML(emailData.subject)}')" style="background: #16a34a; color: white; border: none; padding: 8px 18px; border-radius: 6px; font-weight: 600; cursor: pointer;">
+                    🚀 Confirm & Send Reply
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+async function approveAndSendEmail(toEmail, subject) {
+    const replyText = document.getElementById("autoEmailReplyText").value;
+    const actionsGroup = document.getElementById("emailCardActions");
+
+    if (actionsGroup) {
+        actionsGroup.innerHTML = `<span style="color: #60a5fa; font-weight: 600;">Sending Email... ⏳</span>`;
+    }
+
+    try {
+        const res = await fetch("http://127.0.0.1:5000/api/send-email", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+                to_email: toEmail, 
+                subject: subject, 
+                body: replyText,
+                user_email: currentUser ? currentUser.email : null
+            })
+        });
+        const data = await res.json();
+
+        if (data.status === "success" || data.success) {
+            if (actionsGroup) {
+                actionsGroup.innerHTML = `<span style="color: #34d399; font-weight: bold;">✅ Reply Sent Successfully!</span>`;
+            }
+        } else {
+            throw new Error(data.message || "Failed to send");
+        }
+    } catch (err) {
+        if (actionsGroup) {
+            actionsGroup.innerHTML = `<span style="color: #f87171;">❌ Error sending email.</span>`;
+        }
+    }
+}
+
+function dismissEmailCard() {
+    const card = document.getElementById("incomingEmailCard");
+    if (card) card.remove();
+}
+
+/* ==========================================
+    PROMPT EXECUTION ENGINE
 ========================================== */
 async function sendPrompt() {
     const input = document.getElementById("userInput");
     const status = document.getElementById("demoStatus");
 
-    if (!input || !status) {
-        console.error("HTML elements 'userInput' ya 'demoStatus' nahi mile!");
-        return;
-    }
+    if (!input || !status) return;
 
     const text = input.value.trim();
-
     if (text === "") {
         status.style.display = "block";
-        status.innerHTML = "<div class='glass-card'>⚠️ Please enter a prompt for DoPilot.</div>";
+        status.innerHTML = "<div class='glass-card'>⚠️ Please enter a prompt for Inklur.</div>";
         return;
     }
 
     status.style.display = "block";
-    status.innerHTML = "<div class='glass-card'>⏳ DoPilot is analyzing your task...</div>";
+    status.innerHTML = "<div class='glass-card'>⏳ Inklur is analyzing your task...</div>";
 
     try {
         const response = await fetch("http://127.0.0.1:5000/api/execute", {
@@ -47,7 +228,6 @@ async function sendPrompt() {
         const data = await response.json();
 
         if (data.success) {
-            // Smart History Entry Generation
             let historyText = data.result || data.message;
             if (data.tool_name === "gmail_automation" && data.result && data.result.target_person) {
                 historyText = `Gmail Task Processed for '${data.result.target_person}'`;
@@ -59,24 +239,63 @@ async function sendPrompt() {
             renderHistoryList();
 
             displayAIResponse(data, status);
+            
             input.value = "";
+            input.style.height = "auto";
+            input.classList.remove("overflow-active");
+            
         } else {
             status.innerHTML = "<div class='glass-card'>❌ Error: " + escapeHTML(data.message) + "</div>";
         }
 
     } catch (error) {
         console.error("Backend Error:", error);
-        status.innerHTML =
-            "<div class='glass-card'>❌ Could not connect to Python Server.<br>Make sure 'python app.py' terminal me chal raha hai.</div>";
+        status.innerHTML = "<div class='glass-card'>❌ Could not connect to Python Server. Make sure 'python app.py' is running.</div>";
     }
 }
 
 function displayAIResponse(data, statusElement) {
-    // CASE 1: GMAIL AUTOMATION TOOL DETECTED
+    // 1. Handle Gmail Automation Workflow
     if (data.tool_name === "gmail_automation") {
         const res = data.result;
 
+        // SCENARIO A: Multiple Contacts Found (Disambiguation)
+        if (res && res.status === "multiple_found") {
+            let optionsHtml = res.contacts.map((contact, index) => {
+                const safeEmail = JSON.stringify(contact.email).replace(/"/g, '&quot;');
+                const safeName = escapeHTML(contact.name);
+                
+                return `
+                <div style="background: #1e293b; border: 1px solid #334155; padding: 10px; margin-bottom: 8px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <div style="font-size: 0.8rem; color: #94a3b8;">Option ${index + 1}</div>
+                        <div style="font-weight: 600; color: #f8fafc; font-size: 0.95rem;">${safeName}</div>
+                        <div style="font-size: 0.80rem; color: #38bdf8;">${escapeHTML(contact.email)}</div>
+                    </div>
+                    <button onclick='handleContactSelection(${safeEmail})' style="background: #6366f1; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: bold; transition: 0.2s;">
+                        Select
+                    </button>
+                </div>
+            `;
+            }).join('');
+
+            statusElement.innerHTML = `
+                <div class="glass-card" style="margin-top: 10px; background: #0f172a; border-radius: 12px; padding: 18px; border: 1px solid #fbbf24;">
+                    <h4 style="margin: 0 0 12px 0; color: #fbbf24;">🔍 Multiple Contacts Found</h4>
+                    <p style="font-size: 0.9rem; color: #cbd5e1; margin-bottom: 12px;">${escapeHTML(res.message)}</p>
+                    <div style="max-height: 250px; overflow-y: auto; padding-right: 5px;">
+                        ${optionsHtml}
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        // SCENARIO B: Single Exact Match Found
         if (res && res.status === "success") {
+            const safeTarget = JSON.stringify(res.target_email || res.target_person).replace(/"/g, '&quot;');
+            const safeSubject = JSON.stringify(res.subject).replace(/"/g, '&quot;');
+
             statusElement.innerHTML = `
                 <div class="glass-card" style="margin-top: 10px; text-align: left; background: #0f172a; border-radius: 12px; padding: 18px; color: #F8FAFC; border: 1px solid #3b82f6;">
                     <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155; padding-bottom: 10px;">
@@ -94,34 +313,34 @@ function displayAIResponse(data, statusElement) {
 
                     <div style="margin-top: 14px;">
                         <h5 style="color: #F59E0B; margin: 0 0 6px 0; font-size: 0.9rem;">🤖 Proposed AI Response:</h5>
-                        <textarea id="emailMessage" style="width: 100%; height: 75px; background: #1e293b; color: #F8FAFC; border: 1px solid #475569; border-radius: 6px; padding: 8px; font-family: inherit; resize: vertical;">${res.proposed_reply}</textarea>
+                        <textarea id="emailMessage" style="width: 100%; height: 75px; background: #1e293b; color: #F8FAFC; border: 1px solid #475569; border-radius: 6px; padding: 8px; font-family: inherit; resize: vertical;">${escapeHTML(res.proposed_reply)}</textarea>
                     </div>
 
-                    <button onclick="sendDirectEmail('${escapeHTML(res.target_person)}', '${escapeHTML(res.subject)}')" style="margin-top: 12px; width: 100%; background: #2563EB; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s;">
+                    <button onclick='sendDirectEmail(${safeTarget}, ${safeSubject})' style="margin-top: 12px; width: 100%; background: #2563EB; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s;">
                         🚀 Confirm & Send Email Now
                     </button>
                 </div>
             `;
-        } else {
-            statusElement.innerHTML = `<div class='glass-card' style='color: #EF4444;'>❌ ${escapeHTML(res ? res.message : "Email fetch failed")}</div>`;
-        }
+            return;
+        } 
+        
+        statusElement.innerHTML = `<div class='glass-card' style='color: #EF4444;'>❌ ${escapeHTML(res ? res.message : "Email fetch failed")}</div>`;
         return;
     }
 
-    // CASE 2: NORMAL RESPONSE TEXT
+    // 2. Handle Standard AI Text Responses & Web Automation
     let resultText = data.result || (data.parsed_action ? data.parsed_action.message : "Task analyzed successfully.");
     
     let messageHTML = `
-        🚀 <strong>DoPilot Response:</strong>
+        🚀 <strong>Inklur Response:</strong>
         <div class='glass-card' style="margin-top: 6px;">
             ${escapeHTML(resultText)}
         </div>
     `;
 
-    // CASE 3: ACTION REQUIRED -> WEB AUTOMATION APPROVAL CARD
     if (data.action_required && data.parsed_action) {
         const action = data.parsed_action;
-        currentPendingAction = action; // Save state for execution
+        currentPendingAction = action;
 
         let paramsHtml = "";
         if (action.parameters && Array.isArray(action.parameters)) {
@@ -165,9 +384,12 @@ function displayAIResponse(data, statusElement) {
     statusElement.innerHTML = messageHTML;
 }
 
-/* ==========================================
-   REAL-TIME ACTION EXECUTOR (WEB AUTOMATION)
-========================================== */
+function handleContactSelection(exactEmail) {
+    const input = document.getElementById("userInput");
+    input.value = `Send an email to ${exactEmail}`;
+    sendPrompt();
+}
+
 async function approveAction() {
     const badge = document.getElementById("cardStatusBadge");
     const actionsGroup = document.getElementById("cardActionsGroup");
@@ -179,7 +401,7 @@ async function approveAction() {
     }
 
     if (actionsGroup) {
-        actionsGroup.innerHTML = `<span style="color: #60a5fa;">Capturing Live Screenshot...</span>`;
+        actionsGroup.innerHTML = `<span style="color: #60a5fa;">Launching Playwright Engine...</span>`;
     }
 
     try {
@@ -198,17 +420,24 @@ async function approveAction() {
                 badge.innerText = "Completed ✓";
             }
             
+            // 🛠️ FIX: Screenshot extraction (Supports direct, nested data, or data.screenshot)
+            const base64Screenshot = resData.screenshot || (resData.data && resData.data.screenshot);
+
             if (actionsGroup) {
-                actionsGroup.innerHTML = `
-                    <div style="width: 100%; margin-top: 10px;">
-                        <div style="color: #34d399; font-weight: 600; margin-bottom: 8px;">
-                            ✅ Live Browser Result:
+                if (base64Screenshot) {
+                    actionsGroup.innerHTML = `
+                        <div style="width: 100%; margin-top: 10px;">
+                            <div style="color: #34d399; font-weight: 600; margin-bottom: 8px;">
+                                ✅ Live Browser Result:
+                            </div>
+                            <div style="border: 2px solid #334155; border-radius: 8px; overflow: hidden;">
+                                <img src="${base64Screenshot}" alt="Browser Screenshot" style="width: 100%; height: auto; display: block;" />
+                            </div>
                         </div>
-                        <div style="border: 2px solid #334155; border-radius: 8px; overflow: hidden;">
-                            <img src="${resData.screenshot}" alt="Browser Screenshot" style="width: 100%; height: auto; display: block;" />
-                        </div>
-                    </div>
-                `;
+                    `;
+                } else {
+                    actionsGroup.innerHTML = `<span style="color: #34d399; font-weight: bold;">✅ Task Executed Successfully (No screenshot captured)</span>`;
+                }
             }
         } else {
             throw new Error(resData.error || "Execution failed");
@@ -219,7 +448,7 @@ async function approveAction() {
             badge.innerText = "Failed ❌";
         }
         if (actionsGroup) {
-            actionsGroup.innerHTML = `<span style="color: #f87171;">Error: ${err.message}</span>`;
+            actionsGroup.innerHTML = `<span style="color: #f87171;">Error: ${escapeHTML(err.message)}</span>`;
         }
     }
 }
@@ -239,9 +468,6 @@ function cancelAction() {
     }
 }
 
-/* ==========================================
-   DIRECT GMAIL DISPATCHER
-========================================== */
 async function sendDirectEmail(toEmail, subject) {
     const bodyText = document.getElementById("emailMessage").value;
     const status = document.getElementById("demoStatus");
@@ -250,11 +476,16 @@ async function sendDirectEmail(toEmail, subject) {
         const res = await fetch("http://127.0.0.1:5000/api/send-email", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ to_email: toEmail, subject: subject, body: bodyText })
+            body: JSON.stringify({ 
+                to_email: toEmail, 
+                subject: subject, 
+                body: bodyText,
+                user_email: currentUser ? currentUser.email : null
+            })
         });
         const data = await res.json();
         
-        if (data.status === "success") {
+        if (data.status === "success" || data.success) {
             alert("✅ Email Sent Successfully!");
             if (status) {
                 status.innerHTML = `<div class='glass-card' style='color: #10B981;'>✅ Email sent successfully to ${escapeHTML(toEmail)}!</div>`;
@@ -268,7 +499,7 @@ async function sendDirectEmail(toEmail, subject) {
 }
 
 /* ==========================================
-   CHAT HISTORY & SIDEBAR MANAGER
+    CHAT HISTORY & AUTH MANAGEMENT
 ========================================== */
 function renderHistoryList() {
     const listDiv = document.getElementById("historyList");
@@ -291,9 +522,6 @@ function clearHistory() {
     if (status) status.innerHTML = "<div class='glass-card'>Started a fresh new conversation!</div>";
 }
 
-/* ==========================================
-   AUTHENTICATION & MODAL CONTROLLER
-========================================== */
 function openAuthModal(mode) {
     const modal = document.getElementById("authModal");
     if (modal) {
@@ -412,13 +640,19 @@ function handleLogout() {
     updateNavUI();
 }
 
-/* ==========================================
-   PROFILE DROPDOWN & NAV UI CONTROLLER
-========================================== */
-function toggleProfileDropdown(event) {
-    event.stopPropagation();
+// Hover & Click supported dropdown toggler
+function toggleProfileDropdown(event, forceState) {
+    if (event) event.stopPropagation();
     const dropdown = document.getElementById("profileDropdown");
-    if (dropdown) {
+    if (!dropdown) return;
+
+    if (typeof forceState === "boolean") {
+        if (forceState) {
+            dropdown.classList.add("show");
+        } else {
+            dropdown.classList.remove("show");
+        }
+    } else {
         dropdown.classList.toggle("show");
     }
 }
@@ -436,22 +670,16 @@ function updateNavUI() {
 
     if (currentUser) {
         navContainer.innerHTML = `
-            <div class="profile-menu-container">
+            <div class="profile-menu-container" onmouseenter="toggleProfileDropdown(event, true)" onmouseleave="toggleProfileDropdown(event, false)">
                 <div class="profile-badge" onclick="toggleProfileDropdown(event)">
                     <span>👤 ${escapeHTML(currentUser.name || 'User')}</span>
                     <span style="font-size: 0.7rem; color: #94a3b8;">▼</span>
                 </div>
                 
                 <div class="profile-dropdown" id="profileDropdown">
-                    <button onclick="openProfileSettings()">
-                        ✏️ Edit Profile
-                    </button>
-                    <button onclick="selectPlan('Pro Plan')">
-                        ⚡ Upgrade Plan
-                    </button>
-                    <button class="logout-btn" onclick="handleLogout()">
-                        🚪 Logout
-                    </button>
+                    <button onclick="openProfileSettings()">✏️ Edit Profile</button>
+                    <button onclick="selectPlan('Pro Plan')">⚡ Upgrade Plan</button>
+                    <button class="logout-btn" onclick="handleLogout()">🚪 Logout</button>
                 </div>
             </div>
         `;
@@ -465,75 +693,7 @@ function updateNavUI() {
 }
 
 function openProfileSettings() {
-    alert("Edit profile feature coming soon!");
-}
-
-/* ==========================================
-   UI HELPERS & UTILITIES
-========================================== */
-function handleEnter(event) {
-    if (event.key === "Enter") {
-        sendPrompt();
-    }
-}
-
-function scrollToPrompt() {
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    setTimeout(function () {
-        const input = document.getElementById("userInput");
-        if (input) input.focus();
-    }, 600);
-}
-
-if ('scrollRestoration' in history) {
-    history.scrollRestoration = 'manual';
-}
-
-window.addEventListener('beforeunload', function () {
-    window.scrollTo(0, 0);
-});
-
-const useCasesData = {
-    email: {
-        title: "Email Automation",
-        desc: '"Summarize important emails and prepare replies for my approval."'
-    },
-    research: {
-        title: "Research Automation",
-        desc: '"Research a topic, collect useful information and create a structured summary."'
-    },
-    data: {
-        title: "Data Processing",
-        desc: '"Take information from multiple sources and organize it into a structured dataset."'
-    },
-    automation: {
-        title: "Workflow Automation",
-        desc: '"When a new customer submits a form, process the information and trigger the required workflow."'
-    }
-};
-
-function showUseCase(key, element) {
-    const buttons = document.querySelectorAll(".tab-btn");
-    buttons.forEach(function (button) {
-        button.classList.remove("active");
-    });
-
-    element.classList.add("active");
-
-    const box = document.getElementById("usecase-box");
-    if (box && useCasesData[key]) {
-        box.innerHTML = `
-            <h4>${escapeHTML(useCasesData[key].title)}</h4>
-            <p>${escapeHTML(useCasesData[key].desc)}</p>
-        `;
-    }
-}
-
-function selectPlan(planName) {
-    alert(
-        "You selected the " + planName + " plan.\n\n" +
-        "DoPilot is currently in concept/MVP development."
-    );
+    alert("✏️ Edit profile feature coming soon!");
 }
 
 function escapeHTML(text) {
@@ -549,9 +709,9 @@ function togglePasswordVisibility(inputId, btn) {
 
     if (input.type === "password") {
         input.type = "text";
-        btn.innerText = "🙈";
+        if (btn) btn.innerHTML = '<span aria-hidden="true">🙈</span>';
     } else {
         input.type = "password";
-        btn.innerText = "👁️";
+        if (btn) btn.innerHTML = '<span aria-hidden="true">👁️</span>';
     }
 }
