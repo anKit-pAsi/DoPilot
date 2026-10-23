@@ -1,33 +1,413 @@
 ﻿/* ==========================================
-    GLOBAL STATES & INITIALIZATION
+   INKLUR CONFIG
 ========================================== */
-let chatHistory = JSON.parse(localStorage.getItem("dopilot_history")) || [];
-let currentUser = JSON.parse(localStorage.getItem("dopilot_user")) || null;
-let currentPendingAction = null;
 
-document.addEventListener('DOMContentLoaded', () => {
-    renderHistoryList();
-    updateNavUI();
-    initAutoResizeTextarea();
-    
-    // Har 15 Seconds me Unread Incoming Emails check honge
-    // setInterval(checkForIncomingEmails, 15000);
-});
+const API_BASE = "http://127.0.0.1:5000";
+const CONTACT_EMAIL = "build@inklur.ai";
+const MAX_HISTORY_ITEMS = 40;
+const EMAIL_POLL_INTERVAL_MS = 60_000;
+
+let chatHistory = readMigratedJSON("inklur_history", "dopilot_history", []);
+let currentUser = getPublicUser(
+    readMigratedJSON("inklur_user", "dopilot_user", null)
+);
+let currentPendingAction = null;
+let currentApprovalId = null;
+let currentContacts = [];
+let pendingIncomingEmail = null;
+let pendingDirectEmail = null;
+let isExecuting = false;
+let isSendingEmail = false;
+let isCheckingEmail = false;
+let emailPollTimer = null;
+let toastTimer = null;
+let previousFocus = null;
+
+if (!Array.isArray(chatHistory)) {
+    chatHistory = [];
+}
 
 /* ==========================================
-    UI HELPER FUNCTIONS (Try Demo, Use Cases, Pricing)
+   STORAGE & API HELPERS
 ========================================== */
-function scrollToPrompt() {
-    const input = document.getElementById("userInput");
-    if (input) {
-        input.scrollIntoView({ behavior: "smooth", block: "center" });
-        setTimeout(() => input.focus(), 500); 
+
+function readMigratedJSON(newKey, legacyKey, fallback) {
+    try {
+        let raw = localStorage.getItem(newKey);
+
+        if (!raw && legacyKey) {
+            raw = localStorage.getItem(legacyKey);
+            if (raw) localStorage.setItem(newKey, raw);
+        }
+
+        if (legacyKey) localStorage.removeItem(legacyKey);
+        return raw ? JSON.parse(raw) : fallback;
+    } catch {
+        return fallback;
     }
 }
 
-function selectPlan(planName) {
-    alert(`🚀 Thanks for choosing the ${planName}! This feature is in early development. Waitlist functionality coming soon.`);
+function safeSave(key, value) {
+    try {
+        if (value === null || value === undefined) {
+            localStorage.removeItem(key);
+        } else {
+            localStorage.setItem(key, JSON.stringify(value));
+        }
+    } catch {
+        console.warn("Browser storage is unavailable.");
+    }
 }
+
+function getPublicUser(user) {
+    if (!user || typeof user !== "object" || typeof user.email !== "string") {
+        return null;
+    }
+
+    // Never retain access tokens in browser storage.
+    return {
+        id: user.id ?? null,
+        name: typeof user.name === "string" ? user.name : "",
+        email: user.email
+    };
+}
+
+function savePublicUser(user) {
+    currentUser = getPublicUser(user);
+    safeSave("inklur_user", currentUser);
+}
+
+function clearPublicUser() {
+    currentUser = null;
+
+    try {
+        localStorage.removeItem("inklur_user");
+        localStorage.removeItem("dopilot_user");
+    } catch {
+        // Storage may be disabled.
+    }
+}
+
+function escapeHTML(value) {
+    if (value === null || value === undefined) return "";
+
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function friendlyNetworkError(error) {
+    if (error?.name === "AbortError") {
+        return "The request took too long. Please try again.";
+    }
+    if (error instanceof TypeError) {
+        return "Could not reach the Inklur server. Please try again.";
+    }
+    return error?.message || "Something went wrong. Please try again.";
+}
+
+async function apiRequest(path, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+        () => controller.abort(),
+        options.timeoutMs || 30_000
+    );
+    const headers = { Accept: "application/json" };
+    const fetchOptions = {
+        method: options.method || "POST",
+        headers,
+        credentials: "include",
+        signal: controller.signal
+    };
+
+    if (options.body !== undefined) {
+        headers["Content-Type"] = "application/json";
+        fetchOptions.body = JSON.stringify(options.body);
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}${path}`, fetchOptions);
+        let data = null;
+
+        try {
+            data = await response.json();
+        } catch {
+            // Handle invalid or empty JSON below.
+        }
+
+        if (response.status === 401 && currentUser) {
+            handleSessionExpired();
+        }
+
+        if (!response.ok) {
+            throw new Error(
+                data?.message ||
+                data?.error ||
+                `Request failed (HTTP ${response.status}).`
+            );
+        }
+
+        if (!data || typeof data !== "object") {
+            throw new Error("The server returned an invalid response.");
+        }
+
+        return data;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function postJSON(path, body = {}, timeoutMs = 30_000) {
+    return apiRequest(path, { method: "POST", body, timeoutMs });
+}
+
+function getJSON(path, timeoutMs = 15_000) {
+    return apiRequest(path, { method: "GET", timeoutMs });
+}
+
+function newIdempotencyKey() {
+    return window.crypto?.randomUUID
+        ? window.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function handleSessionExpired() {
+    const hadUser = Boolean(currentUser);
+    clearPublicUser();
+    stopEmailPolling();
+    updateNavUI();
+
+    if (hadUser) {
+        showToast("🔒 Your session expired. Please log in again.", 4500);
+    }
+}
+
+/* ==========================================
+   STARTUP
+========================================== */
+
+document.addEventListener("DOMContentLoaded", async () => {
+    injectRuntimeStyles();
+    renderHistoryList();
+    updateNavUI();
+    initAutoResizeTextarea();
+    initMailtoLinks();
+    initModalControls();
+    initMobileNav();
+    await restoreSession();
+});
+
+async function restoreSession() {
+    try {
+        const result = await getJSON("/api/me");
+
+        if (result.success && result.user) {
+            savePublicUser(result.user);
+            updateNavUI();
+            startEmailPolling();
+            return;
+        }
+    } catch {
+        // No active session. The user can log in normally.
+    }
+
+    clearPublicUser();
+    updateNavUI();
+}
+
+/* ==========================================
+   TOAST & RUNTIME STYLES
+========================================== */
+
+function injectRuntimeStyles() {
+    if (document.getElementById("inklur-runtime-styles")) return;
+
+    const style = document.createElement("style");
+    style.id = "inklur-runtime-styles";
+    style.textContent = `
+        .glass-card {
+            background: rgba(15, 23, 42, .85);
+            border: 1px solid rgba(255, 255, 255, .1);
+            border-radius: 12px;
+            padding: 14px 16px;
+            color: #e2e8f0;
+            line-height: 1.8;
+            overflow-wrap: anywhere;
+        }
+        .history-item {
+            padding: 8px 12px;
+            border-radius: 8px;
+            color: #cbd5e1;
+            font-size: 14px;
+            overflow-wrap: anywhere;
+        }
+        .inklur-toast {
+            position: fixed;
+            left: 50%;
+            bottom: 28px;
+            transform: translateX(-50%) translateY(20px);
+            background: #0f172a;
+            border: 1px solid #6366f1;
+            color: #f8fafc;
+            padding: 12px 20px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.5;
+            text-align: center;
+            max-width: calc(100% - 32px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+            z-index: 10000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity .25s ease, transform .25s ease;
+        }
+        .inklur-toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+        .action-card button:disabled {
+            opacity: .6;
+            cursor: not-allowed;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .inklur-toast { transition: none; }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function showToast(message, duration = 3500) {
+    let toast = document.getElementById("inklurToast");
+
+    if (!toast) {
+        toast = document.createElement("div");
+        toast.id = "inklurToast";
+        toast.className = "inklur-toast";
+        toast.setAttribute("role", "status");
+        toast.setAttribute("aria-live", "polite");
+        document.body.appendChild(toast);
+    }
+
+    toast.textContent = message;
+    void toast.offsetWidth;
+    toast.classList.add("show");
+
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove("show"), duration);
+}
+
+/* ==========================================
+   NAVIGATION, PRICING & MAIL LINKS
+========================================== */
+
+function scrollToPrompt() {
+    const input = document.getElementById("userInput");
+    if (!input) return;
+
+    input.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => input.focus(), 300);
+}
+
+function toggleMobileNav(forceState) {
+    const nav = document.getElementById("primaryNav");
+    const button = document.querySelector(".mobile-menu-toggle");
+    if (!nav || !button) return;
+
+    const open = typeof forceState === "boolean"
+        ? forceState
+        : !nav.classList.contains("is-open");
+
+    nav.classList.toggle("is-open", open);
+    button.setAttribute("aria-expanded", String(open));
+    button.setAttribute(
+        "aria-label",
+        open ? "Close navigation menu" : "Open navigation menu"
+    );
+}
+
+function initMobileNav() {
+    const nav = document.getElementById("primaryNav");
+    if (!nav) return;
+
+    nav.addEventListener("click", (event) => {
+        if (event.target instanceof Element && event.target.closest("a")) {
+            toggleMobileNav(false);
+        }
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") toggleMobileNav(false);
+    });
+}
+
+function selectPlan(planName) {
+    if (planName === "Starter") {
+        if (currentUser) {
+            showToast("🚀 You're all set! Try the demo above.");
+            scrollToPrompt();
+        } else {
+            openAuthModal("signup");
+        }
+        return;
+    }
+
+    joinEarlyAccess(planName);
+}
+
+async function copyToClipboard(text) {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch {
+        // The mail link remains available.
+    }
+    return false;
+}
+
+async function joinEarlyAccess(planName) {
+    const label = planName && planName !== "Early Access"
+        ? planName
+        : "Early Access / Beta Program";
+
+    const copied = await copyToClipboard(CONTACT_EMAIL);
+    showToast(
+        copied
+            ? `📧 Opening your email app… (${CONTACT_EMAIL} is also copied)`
+            : `📧 Opening your email app… If nothing opens, write to ${CONTACT_EMAIL}`
+    );
+
+    window.location.href =
+        `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(`Inklur ${label}`)}`;
+}
+
+function initMailtoLinks() {
+    document.addEventListener("click", async (event) => {
+        if (!(event.target instanceof Element)) return;
+
+        const link = event.target.closest('a[href^="mailto:"]');
+        if (!link) return;
+
+        const address = (link.getAttribute("href") || "")
+            .replace(/^mailto:/i, "")
+            .split("?")[0] || CONTACT_EMAIL;
+
+        const copied = await copyToClipboard(address);
+        showToast(
+            copied
+                ? `📧 Opening your email app… (${address} is also copied)`
+                : `📧 Opening your email app… If nothing opens, write to ${address}`
+        );
+    });
+}
+
+/* ==========================================
+   USE CASE TABS
+========================================== */
 
 const useCaseData = {
     email: '"Summarize my important emails and prepare replies for my approval."',
@@ -37,519 +417,843 @@ const useCaseData = {
 };
 
 const useCaseTitles = {
-    email: 'Email Automation',
-    research: 'Deep Research',
-    data: 'Data Extraction',
-    automation: 'Workflow Automation'
+    email: "Email Automation",
+    research: "Deep Research",
+    data: "Data Extraction",
+    automation: "Workflow Automation"
 };
 
-function showUseCase(type, btnElement) {
-    const allTabs = document.querySelectorAll('.tab-btn');
-    allTabs.forEach(tab => tab.classList.remove('active'));
-    btnElement.classList.add('active');
+function showUseCase(type, button) {
+    const box = document.getElementById("usecase-box");
+    if (!box || !useCaseTitles[type]) return;
 
-    const contentBox = document.getElementById('usecase-box');
-    if (contentBox) {
-        contentBox.innerHTML = `
-            <h4>${useCaseTitles[type]}</h4>
-            <p>${useCaseData[type]}</p>
-        `;
+    document.querySelectorAll(".tab-btn").forEach((tab) => {
+        tab.classList.remove("active");
+        tab.setAttribute("aria-pressed", "false");
+    });
+
+    if (button) {
+        button.classList.add("active");
+        button.setAttribute("aria-pressed", "true");
     }
+
+    box.innerHTML =
+        `<h3>${escapeHTML(useCaseTitles[type])}</h3>` +
+        `<p>${escapeHTML(useCaseData[type])}</p>`;
 }
 
 /* ==========================================
-    DYNAMIC TEXTAREA AUTO-RESIZE & ENTER KEY
+   PROMPT TEXTAREA
 ========================================== */
+
 function initAutoResizeTextarea() {
-    const userInput = document.getElementById("userInput");
-    if (userInput) {
-        userInput.addEventListener("input", autoResizeInput);
-    }
+    const input = document.getElementById("userInput");
+    if (!input) return;
+
+    input.addEventListener("input", autoResizeInput);
+    autoResizeInput();
 }
 
 function autoResizeInput() {
-    const userInput = document.getElementById("userInput");
-    if (userInput) {
-        userInput.style.height = "auto";
-        userInput.style.height = userInput.scrollHeight + "px";
-        
-        if (userInput.scrollHeight > 250) {
-            userInput.classList.add("overflow-active");
-        } else {
-            userInput.classList.remove("overflow-active");
-        }
-    }
+    const input = document.getElementById("userInput");
+    if (!input) return;
+
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 250)}px`;
+    input.classList.toggle("overflow-active", input.scrollHeight > 250);
 }
 
 function handleEnter(event) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.isComposing
+    ) {
         event.preventDefault();
         sendPrompt();
     }
 }
 
 /* ==========================================
-    REAL-TIME INCOMING EMAIL WATCHER
+   EMAIL NOTIFICATION & TWO-STEP APPROVAL
 ========================================== */
+
+function startEmailPolling() {
+    if (!currentUser || emailPollTimer) return;
+
+    checkForIncomingEmails();
+    emailPollTimer = setInterval(
+        checkForIncomingEmails,
+        EMAIL_POLL_INTERVAL_MS
+    );
+}
+
+function stopEmailPolling() {
+    if (!emailPollTimer) return;
+    clearInterval(emailPollTimer);
+    emailPollTimer = null;
+}
+
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && currentUser) checkForIncomingEmails();
+});
+
 async function checkForIncomingEmails() {
-    if (!currentUser || !currentUser.email) return;
+    if (!currentUser || isCheckingEmail || document.hidden) return;
+
+    isCheckingEmail = true;
 
     try {
-        const response = await fetch("http://127.0.0.1:5000/api/check-email-notifications", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ user_email: currentUser.email })
-        });
-        const res = await response.json();
+        const result = await postJSON("/api/check-email-notifications", {});
+        if (!result.success || !result.has_notification || !result.data) return;
 
-        if (res.success && res.has_notification) {
-            renderEmailApprovalCard(res.data);
-        }
-    } catch (err) {
-        // Background polling silent check
+        const email = normalizeIncomingEmail(result.data);
+        if (!email?.emailId) return;
+
+        if (pendingIncomingEmail?.emailId === email.emailId) return;
+
+        pendingIncomingEmail = email;
+        renderEmailNotificationCard();
+    } catch (error) {
+        if (error.status === 401) stopEmailPolling();
+    } finally {
+        isCheckingEmail = false;
     }
 }
 
-function renderEmailApprovalCard(emailData) {
-    const statusElement = document.getElementById("demoStatus");
-    if (!statusElement) return;
+function normalizeIncomingEmail(data) {
+    if (!data || typeof data !== "object") return null;
 
-    statusElement.style.display = "block";
-    
-    statusElement.innerHTML = `
-        <div class="action-card" id="incomingEmailCard" style="margin-top: 15px; padding: 18px; border: 1px solid #3b82f6; border-radius: 12px; background: #0f172a; text-align: left; box-shadow: 0 10px 30px rgba(59, 130, 246, 0.25);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #1e293b; padding-bottom: 8px;">
-                <span style="background: #1e1b4b; color: #818cf8; padding: 4px 10px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; border: 1px solid #3730a3;">
-                    📧 New Email Received
+    return {
+        emailId: String(data.email_id || data.id || ""),
+        sender: String(data.sender || "Unknown sender"),
+        email: String(data.email || ""),
+        subject: String(data.subject || "No subject"),
+        snippet: String(data.snippet || ""),
+        proposedReply: "",
+        status: "pending"
+    };
+}
+
+function renderEmailNotificationCard() {
+    const status = document.getElementById("demoStatus");
+    const email = pendingIncomingEmail;
+    if (!status || !email) return;
+
+    status.style.display = "block";
+    status.innerHTML = `
+        <div class="action-card" id="incomingEmailCard"
+             style="margin-top:15px;padding:18px;border:1px solid #3b82f6;border-radius:12px;background:#0f172a;text-align:left;">
+            <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px;border-bottom:1px solid #1e293b;padding-bottom:8px;">
+                <span style="background:#1e1b4b;color:#818cf8;padding:4px 10px;border-radius:20px;font-size:.8rem;font-weight:600;">
+                    📧 New Email
                 </span>
-                <span style="background: #065f46; color: #34d399; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
-                    AI Friendly Reply Ready
+                <span style="color:#fbbf24;font-size:.8rem;font-weight:600;">
+                    Approve before drafting
                 </span>
             </div>
-
-            <div style="margin-bottom: 10px;">
-                <p style="margin: 2px 0; font-size: 0.9rem; color: #f8fafc;"><strong>From:</strong> ${escapeHTML(emailData.sender)} (${escapeHTML(emailData.email)})</p>
-                <p style="margin: 2px 0; font-size: 0.9rem; color: #38bdf8;"><strong>Subject:</strong> ${escapeHTML(emailData.subject)}</p>
+            <p style="margin:4px 0;font-size:.9rem;color:#f8fafc;">
+                <strong>From:</strong> ${escapeHTML(email.sender)}
+                ${email.email ? `(${escapeHTML(email.email)})` : ""}
+            </p>
+            <p style="margin:4px 0 10px;font-size:.9rem;color:#38bdf8;">
+                <strong>Subject:</strong> ${escapeHTML(email.subject)}
+            </p>
+            <div style="background:#1e293b;padding:10px;border-radius:6px;font-size:.85rem;color:#cbd5e1;margin-bottom:12px;border:1px solid #334155;">
+                ${escapeHTML(email.snippet)}
             </div>
-
-            <div style="background: #1e293b; padding: 10px; border-radius: 6px; font-size: 0.85rem; color: #cbd5e1; margin-bottom: 12px; border: 1px solid #334155;">
-                "${escapeHTML(emailData.snippet)}"
-            </div>
-
-            <div style="margin-bottom: 12px;">
-                <label style="color: #fbbf24; font-size: 0.85rem; font-weight: 600; display: block; margin-bottom: 4px;">
-                    🤖 Proposed Friendly Reply (Editable):
-                </label>
-                <textarea id="autoEmailReplyText" style="width: 100%; height: 80px; background: #0f172a; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 8px; font-family: inherit; font-size: 0.9rem; resize: vertical;">${escapeHTML(emailData.proposed_reply)}</textarea>
-            </div>
-
-            <div id="emailCardActions" style="display: flex; gap: 10px; justify-content: flex-end;">
-                <button onclick="dismissEmailCard()" style="background: #475569; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer;">
-                    ✕ Ignore
+            <div id="emailCardActions" style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">
+                <button type="button" onclick="dismissEmailCard()"
+                        style="background:#475569;color:white;border:0;padding:8px 16px;border-radius:6px;font-weight:600;cursor:pointer;">
+                    Cancel
                 </button>
-                <button onclick="approveAndSendEmail('${escapeHTML(emailData.email)}', '${escapeHTML(emailData.subject)}')" style="background: #16a34a; color: white; border: none; padding: 8px 18px; border-radius: 6px; font-weight: 600; cursor: pointer;">
-                    🚀 Confirm & Send Reply
+                <button type="button" onclick="prepareEmailReply()"
+                        style="background:#2563eb;color:white;border:0;padding:8px 18px;border-radius:6px;font-weight:600;cursor:pointer;">
+                    Approve &amp; Prepare Draft
                 </button>
             </div>
         </div>
     `;
 }
 
-async function approveAndSendEmail(toEmail, subject) {
-    const replyText = document.getElementById("autoEmailReplyText").value;
-    const actionsGroup = document.getElementById("emailCardActions");
+async function prepareEmailReply() {
+    const email = pendingIncomingEmail;
+    const actions = document.getElementById("emailCardActions");
 
-    if (actionsGroup) {
-        actionsGroup.innerHTML = `<span style="color: #60a5fa; font-weight: 600;">Sending Email... ⏳</span>`;
+    if (!email?.emailId || email.status !== "pending") return;
+
+    email.status = "preparing";
+    if (actions) {
+        actions.innerHTML =
+            '<span role="status" aria-live="polite" style="color:#93c5fd;">Preparing your draft…</span>';
     }
 
     try {
-        const res = await fetch("http://127.0.0.1:5000/api/send-email", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                to_email: toEmail, 
-                subject: subject, 
-                body: replyText,
-                user_email: currentUser ? currentUser.email : null
-            })
+        const result = await postJSON("/api/prepare-email-reply", {
+            email_id: email.emailId
         });
-        const data = await res.json();
 
-        if (data.status === "success" || data.success) {
-            if (actionsGroup) {
-                actionsGroup.innerHTML = `<span style="color: #34d399; font-weight: bold;">✅ Reply Sent Successfully!</span>`;
-            }
-        } else {
-            throw new Error(data.message || "Failed to send");
+        if (!result.success) {
+            throw new Error(result.message || "Could not prepare the draft.");
         }
-    } catch (err) {
-        if (actionsGroup) {
-            actionsGroup.innerHTML = `<span style="color: #f87171;">❌ Error sending email.</span>`;
-        }
+
+        const data = result.data || result;
+        email.proposedReply = String(data.proposed_reply || data.draft || "");
+        email.status = "drafted";
+        renderEmailDraftCard();
+    } catch (error) {
+        email.status = "pending";
+        showEmailCardError(error);
     }
 }
 
-function dismissEmailCard() {
-    const card = document.getElementById("incomingEmailCard");
-    if (card) card.remove();
+function renderEmailDraftCard() {
+    const status = document.getElementById("demoStatus");
+    const email = pendingIncomingEmail;
+    if (!status || !email) return;
+
+    status.style.display = "block";
+    status.innerHTML = `
+        <div class="action-card" id="incomingEmailCard"
+             style="margin-top:15px;padding:18px;border:1px solid #3b82f6;border-radius:12px;background:#0f172a;text-align:left;">
+            <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px;border-bottom:1px solid #1e293b;padding-bottom:8px;">
+                <span style="background:#1e1b4b;color:#818cf8;padding:4px 10px;border-radius:20px;font-size:.8rem;font-weight:600;">
+                    📧 Reply Draft
+                </span>
+                <span style="color:#fbbf24;font-size:.8rem;font-weight:600;">
+                    Review and edit before sending
+                </span>
+            </div>
+            <p style="margin:4px 0;font-size:.9rem;color:#f8fafc;">
+                <strong>To:</strong> ${escapeHTML(email.email || email.sender)}
+            </p>
+            <p style="margin:4px 0 10px;font-size:.9rem;color:#38bdf8;">
+                <strong>Subject:</strong> ${escapeHTML(email.subject)}
+            </p>
+            <label for="autoEmailReplyText"
+                   style="display:block;color:#fbbf24;font-size:.85rem;font-weight:600;margin-bottom:5px;">
+                Proposed reply
+            </label>
+            <textarea id="autoEmailReplyText" maxlength="10000"
+                      style="width:100%;min-height:120px;background:#0f172a;color:#f8fafc;border:1px solid #475569;border-radius:6px;padding:10px;font:inherit;resize:vertical;">${escapeHTML(email.proposedReply)}</textarea>
+            <div id="emailCardActions" style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:12px;">
+                <button type="button" onclick="dismissEmailCard()"
+                        style="background:#475569;color:white;border:0;padding:8px 16px;border-radius:6px;font-weight:600;cursor:pointer;">
+                    Cancel draft
+                </button>
+                <button type="button" onclick="approveAndSendEmail()"
+                        style="background:#16a34a;color:white;border:0;padding:8px 18px;border-radius:6px;font-weight:600;cursor:pointer;">
+                    Approve &amp; Send Reply
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+async function dismissEmailCard() {
+    const email = pendingIncomingEmail;
+    if (!email?.emailId) {
+        removeEmailCard();
+        return;
+    }
+
+    try {
+        const result = await postJSON("/api/dismiss-email-notification", {
+            email_id: email.emailId
+        });
+
+        if (!result.success) {
+            throw new Error(result.message || "Could not cancel this email.");
+        }
+
+        removeEmailCard();
+    } catch (error) {
+        showEmailCardError(error);
+    }
+}
+
+async function approveAndSendEmail() {
+    const email = pendingIncomingEmail;
+    const box = document.getElementById("autoEmailReplyText");
+    const actions = document.getElementById("emailCardActions");
+
+    if (!email?.emailId || !box || isSendingEmail) return;
+
+    const body = box.value.trim();
+    if (!body) {
+        showToast("Please add a reply before sending.");
+        box.focus();
+        return;
+    }
+
+    isSendingEmail = true;
+    if (actions) {
+        actions.innerHTML =
+            '<span role="status" aria-live="polite" style="color:#93c5fd;">Sending reply…</span>';
+    }
+
+    try {
+        const result = await postJSON("/api/send-email", {
+            email_id: email.emailId,
+            to_email: email.email,
+            subject: email.subject,
+            body,
+            idempotency_key: newIdempotencyKey()
+        });
+
+        if (result.status !== "success" && !result.success) {
+            throw new Error(result.message || result.error || "Reply was not sent.");
+        }
+
+        if (actions) {
+            actions.innerHTML =
+                '<span role="status" aria-live="polite" style="color:#34d399;font-weight:600;">✅ Reply sent successfully.</span>';
+        }
+
+        email.status = "sent";
+        pendingIncomingEmail = null;
+        showToast("✅ Reply sent successfully.");
+    } catch (error) {
+        showEmailCardError(error);
+    } finally {
+        isSendingEmail = false;
+    }
+}
+
+function removeEmailCard() {
+    document.getElementById("incomingEmailCard")?.remove();
+    pendingIncomingEmail = null;
+}
+
+function showEmailCardError(error) {
+    const actions = document.getElementById("emailCardActions");
+    const message = escapeHTML(friendlyNetworkError(error));
+
+    if (actions) {
+        actions.innerHTML = `<span role="alert" style="color:#f87171;">${message}</span>`;
+    } else {
+        showToast(friendlyNetworkError(error), 5000);
+    }
 }
 
 /* ==========================================
-    PROMPT EXECUTION ENGINE
+   PROMPT EXECUTION & RESPONSE
 ========================================== */
-async function sendPrompt() {
-    const input = document.getElementById("userInput");
-    const status = document.getElementById("demoStatus");
 
-    if (!input || !status) return;
+function setExecuting(state) {
+    isExecuting = state;
+    const button = document.querySelector(".send-btn");
 
-    const text = input.value.trim();
-    if (text === "") {
-        status.style.display = "block";
-        status.innerHTML = "<div class='glass-card'>⚠️ Please enter a prompt for Inklur.</div>";
-        return;
-    }
-
-    status.style.display = "block";
-    status.innerHTML = "<div class='glass-card'>⏳ Inklur is analyzing your task...</div>";
-
-    try {
-        const response = await fetch("http://127.0.0.1:5000/api/execute", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                prompt: text,
-                user_id: currentUser ? currentUser.email : null,
-                history: chatHistory || []
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            let historyText = data.result || data.message;
-            if (data.tool_name === "gmail_automation" && data.result && data.result.target_person) {
-                historyText = `Gmail Task Processed for '${data.result.target_person}'`;
-            }
-
-            chatHistory.push({ sender: "user", text: text });
-            chatHistory.push({ sender: "model", text: typeof historyText === "string" ? historyText : "Task Executed" });
-            localStorage.setItem("dopilot_history", JSON.stringify(chatHistory));
-            renderHistoryList();
-
-            displayAIResponse(data, status);
-            
-            input.value = "";
-            input.style.height = "auto";
-            input.classList.remove("overflow-active");
-            
-        } else {
-            status.innerHTML = "<div class='glass-card'>❌ Error: " + escapeHTML(data.message) + "</div>";
-        }
-
-    } catch (error) {
-        console.error("Backend Error:", error);
-        status.innerHTML = "<div class='glass-card'>❌ Could not connect to Python Server. Make sure 'python app.py' is running.</div>";
+    if (button) {
+        button.disabled = state;
+        button.textContent = state ? "Working… ⏳" : "Execute 🚀";
     }
 }
 
-function displayAIResponse(data, statusElement) {
-    // 1. Handle Gmail Automation Workflow
-    if (data.tool_name === "gmail_automation") {
-        const res = data.result;
+async function sendPrompt() {
+    if (isExecuting) return;
 
-        // SCENARIO A: Multiple Contacts Found (Disambiguation)
-        if (res && res.status === "multiple_found") {
-            let optionsHtml = res.contacts.map((contact, index) => {
-                const safeEmail = JSON.stringify(contact.email).replace(/"/g, '&quot;');
-                const safeName = escapeHTML(contact.name);
-                
-                return `
-                <div style="background: #1e293b; border: 1px solid #334155; padding: 10px; margin-bottom: 8px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <div style="font-size: 0.8rem; color: #94a3b8;">Option ${index + 1}</div>
-                        <div style="font-weight: 600; color: #f8fafc; font-size: 0.95rem;">${safeName}</div>
-                        <div style="font-size: 0.80rem; color: #38bdf8;">${escapeHTML(contact.email)}</div>
-                    </div>
-                    <button onclick='handleContactSelection(${safeEmail})' style="background: #6366f1; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: bold; transition: 0.2s;">
-                        Select
-                    </button>
-                </div>
-            `;
-            }).join('');
+    const input = document.getElementById("userInput");
+    const status = document.getElementById("demoStatus");
+    if (!input || !status) return;
 
-            statusElement.innerHTML = `
-                <div class="glass-card" style="margin-top: 10px; background: #0f172a; border-radius: 12px; padding: 18px; border: 1px solid #fbbf24;">
-                    <h4 style="margin: 0 0 12px 0; color: #fbbf24;">🔍 Multiple Contacts Found</h4>
-                    <p style="font-size: 0.9rem; color: #cbd5e1; margin-bottom: 12px;">${escapeHTML(res.message)}</p>
-                    <div style="max-height: 250px; overflow-y: auto; padding-right: 5px;">
-                        ${optionsHtml}
-                    </div>
-                </div>
-            `;
-            return;
-        }
+    const text = input.value.trim();
+    status.style.display = "block";
 
-        // SCENARIO B: Single Exact Match Found
-        if (res && res.status === "success") {
-            const safeTarget = JSON.stringify(res.target_email || res.target_person).replace(/"/g, '&quot;');
-            const safeSubject = JSON.stringify(res.subject).replace(/"/g, '&quot;');
-
-            statusElement.innerHTML = `
-                <div class="glass-card" style="margin-top: 10px; text-align: left; background: #0f172a; border-radius: 12px; padding: 18px; color: #F8FAFC; border: 1px solid #3b82f6;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155; padding-bottom: 10px;">
-                        <h4 style="margin: 0; color: #38BDF8;">📧 Target Email Detected</h4>
-                        <span style="background: #10B981; color: #000; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold;">Gmail Active</span>
-                    </div>
-
-                    <div style="margin-top: 12px;">
-                        <p style="margin: 4px 0; font-size: 0.9rem;"><strong>Sender:</strong> <span style="color: #94A3B8;">${escapeHTML(res.target_person)}</span></p>
-                        <p style="margin: 4px 0; font-size: 0.9rem;"><strong>Subject:</strong> <span style="color: #94A3B8;">${escapeHTML(res.subject)}</span></p>
-                        <div style="background: #1e293b; padding: 10px; border-radius: 6px; font-size: 0.85rem; color: #CBD5E1; margin-top: 8px; border: 1px solid #334155;">
-                            "${escapeHTML(res.snippet)}"
-                        </div>
-                    </div>
-
-                    <div style="margin-top: 14px;">
-                        <h5 style="color: #F59E0B; margin: 0 0 6px 0; font-size: 0.9rem;">🤖 Proposed AI Response:</h5>
-                        <textarea id="emailMessage" style="width: 100%; height: 75px; background: #1e293b; color: #F8FAFC; border: 1px solid #475569; border-radius: 6px; padding: 8px; font-family: inherit; resize: vertical;">${escapeHTML(res.proposed_reply)}</textarea>
-                    </div>
-
-                    <button onclick='sendDirectEmail(${safeTarget}, ${safeSubject})' style="margin-top: 12px; width: 100%; background: #2563EB; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s;">
-                        🚀 Confirm & Send Email Now
-                    </button>
-                </div>
-            `;
-            return;
-        } 
-        
-        statusElement.innerHTML = `<div class='glass-card' style='color: #EF4444;'>❌ ${escapeHTML(res ? res.message : "Email fetch failed")}</div>`;
+    if (!text) {
+        status.innerHTML =
+            '<div class="glass-card" role="alert">⚠️ Please enter a prompt for Inklur.</div>';
+        input.focus();
         return;
     }
 
-    // 2. Handle Standard AI Text Responses & Web Automation
-    let resultText = data.result || (data.parsed_action ? data.parsed_action.message : "Task analyzed successfully.");
-    
-    let messageHTML = `
-        🚀 <strong>Inklur Response:</strong>
-        <div class='glass-card' style="margin-top: 6px;">
-            ${escapeHTML(resultText)}
+    status.innerHTML =
+        '<div class="glass-card" role="status" aria-live="polite">⏳ Inklur is analyzing your task…</div>';
+    setExecuting(true);
+
+    try {
+        const result = await postJSON(
+            "/api/execute",
+            { prompt: text, history: chatHistory.slice(-20) },
+            60_000
+        );
+
+        if (!result.success) {
+            throw new Error(result.message || result.error || "Request failed.");
+        }
+
+        const historyText =
+            result.result ||
+            result.message ||
+            result.parsed_action?.message ||
+            "Task analyzed.";
+
+        chatHistory.push({ sender: "user", text });
+        chatHistory.push({
+            sender: "model",
+            text: typeof historyText === "string"
+                ? historyText
+                : JSON.stringify(historyText)
+        });
+
+        chatHistory = chatHistory.slice(-MAX_HISTORY_ITEMS);
+        safeSave("inklur_history", chatHistory);
+        renderHistoryList();
+        displayAIResponse(result, status);
+
+        input.value = "";
+        input.style.height = "auto";
+        input.classList.remove("overflow-active");
+    } catch (error) {
+        status.innerHTML =
+            `<div class="glass-card" role="alert">❌ ${escapeHTML(friendlyNetworkError(error))}</div>`;
+    } finally {
+        setExecuting(false);
+    }
+}
+
+function displayAIResponse(data, status) {
+    if (!status || !data) return;
+
+    if (data.tool_name === "gmail_automation") {
+        displayGmailResponse(data.result || {}, status);
+        return;
+    }
+
+    const raw = data.result ??
+        data.parsed_action?.message ??
+        "Task analyzed successfully.";
+
+    const text = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
+
+    let html = `
+        <div>
+            🚀 <strong>Inklur Response:</strong>
+            <div class="glass-card" style="margin-top:6px;white-space:pre-wrap;">
+                ${escapeHTML(text)}
+            </div>
         </div>
     `;
 
     if (data.action_required && data.parsed_action) {
+        currentPendingAction = data.parsed_action;
+        currentApprovalId =
+            data.approval_id ||
+            data.parsed_action.approval_id ||
+            null;
+
         const action = data.parsed_action;
-        currentPendingAction = action;
+        const parameters = Array.isArray(action.parameters)
+            ? action.parameters
+            : [];
 
-        let paramsHtml = "";
-        if (action.parameters && Array.isArray(action.parameters)) {
-            paramsHtml = action.parameters.map(param => `
-                <div style="display:flex; justify-content:space-between; margin-bottom: 4px; font-size: 0.85rem;">
-                    <span style="color: #94a3b8; font-weight: 500;">${escapeHTML(param.label)}:</span>
-                    <span style="color: #f1f5f9; font-weight: 600;">${escapeHTML(param.value)}</span>
-                </div>
-            `).join('');
-        }
+        const parametersHTML = parameters.map((param) => `
+            <div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:4px;font-size:.85rem;">
+                <span style="color:#94a3b8;">${escapeHTML(param.label)}:</span>
+                <span style="color:#f1f5f9;text-align:right;overflow-wrap:anywhere;">
+                    ${escapeHTML(param.value)}
+                </span>
+            </div>
+        `).join("");
 
-        messageHTML += `
-            <div class="action-card" id="activeActionCard" style="margin-top: 15px; padding: 16px; border: 1px solid #3b82f6; border-radius: 10px; background: #0f172a; text-align: left;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <span style="background: #1e1b4b; color: #818cf8; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; border: 1px solid #3730a3;">
-                        ⚡ ${escapeHTML(action.tool_name || 'System Automation')}
+        html += `
+            <div class="action-card" id="activeActionCard"
+                 style="margin-top:15px;padding:16px;border:1px solid #3b82f6;border-radius:10px;background:#0f172a;text-align:left;">
+                <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+                    <span style="color:#818cf8;font-size:.8rem;font-weight:600;">
+                        ⚡ ${escapeHTML(action.tool_name || "System Automation")}
                     </span>
-                    <span id="cardStatusBadge" style="background: #451a03; color: #fbbf24; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
-                        Pending Approval
+                    <span id="cardStatusBadge" style="color:#fbbf24;font-size:.8rem;font-weight:600;">
+                        Pending approval
                     </span>
                 </div>
-
-                <h4 style="margin: 0 0 10px 0; color: #f8fafc; font-size: 0.95rem;">${escapeHTML(action.action_title || 'Task Execution Plan')}</h4>
-                
-                <div style="background: #1e293b; padding: 10px; border-radius: 6px; margin-bottom: 12px;">
-                    ${paramsHtml}
+                <h3 style="margin:0 0 10px;color:#f8fafc;font-size:.95rem;">
+                    ${escapeHTML(action.action_title || "Task Execution Plan")}
+                </h3>
+                <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:12px;">
+                    ${parametersHTML}
                 </div>
-
-                <div id="cardActionsGroup" style="display: flex; gap: 10px; justify-content: flex-end;">
-                    <button onclick="cancelAction()" style="background: #475569; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer;">
-                        ✕ Cancel
+                <div id="cardActionsGroup" style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">
+                    <button type="button" onclick="cancelAction()"
+                            style="background:#475569;color:white;border:0;padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">
+                        Cancel
                     </button>
-                    <button onclick="approveAction()" style="background: #16a34a; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer;">
-                        ✓ Approve & Execute
+                    <button type="button" onclick="approveAction()"
+                            ${currentApprovalId ? "" : "disabled"}
+                            style="background:#16a34a;color:white;border:0;padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">
+                        Approve &amp; Execute
                     </button>
                 </div>
+                ${currentApprovalId ? "" : '<p role="alert" style="margin-top:10px;color:#fca5a5;font-size:.85rem;">The server did not provide a verifiable approval. Please run the task again.</p>'}
             </div>
         `;
     }
 
-    statusElement.innerHTML = messageHTML;
+    status.innerHTML = html;
 }
 
-function handleContactSelection(exactEmail) {
+function displayGmailResponse(result, status) {
+    if (result.status === "multiple_found" && Array.isArray(result.contacts)) {
+        currentContacts = result.contacts.slice(0, 10);
+
+        const contacts = currentContacts.map((contact, index) => `
+            <div style="background:#1e293b;border:1px solid #334155;padding:10px;margin-bottom:8px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="min-width:0;">
+                    <div style="font-size:.8rem;color:#94a3b8;">Option ${index + 1}</div>
+                    <div style="font-weight:600;color:#f8fafc;">
+                        ${escapeHTML(contact.name)}
+                    </div>
+                    <div style="font-size:.8rem;color:#38bdf8;overflow-wrap:anywhere;">
+                        ${escapeHTML(contact.email)}
+                    </div>
+                </div>
+                <button type="button" onclick="handleContactSelection(${index})"
+                        style="background:#6366f1;color:white;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;">
+                    Select
+                </button>
+            </div>
+        `).join("");
+
+        status.innerHTML = `
+            <div class="glass-card" style="margin-top:10px;border-color:#fbbf24;">
+                <h3 style="margin:0 0 12px;color:#fbbf24;font-size:1rem;">
+                    🔍 Multiple contacts found
+                </h3>
+                <p style="margin-bottom:12px;font-size:.9rem;color:#cbd5e1;">
+                    ${escapeHTML(result.message || "Choose the correct contact.")}
+                </p>
+                <div style="max-height:250px;overflow-y:auto;">${contacts}</div>
+            </div>
+        `;
+        return;
+    }
+
+    if (result.status !== "success") {
+        status.innerHTML =
+            `<div class="glass-card" role="alert" style="color:#f87171;">❌ ${escapeHTML(result.message || result.error || "Email task failed.")}</div>`;
+        return;
+    }
+
+    pendingDirectEmail = {
+        emailId: String(result.message_id || result.email_id || ""),
+        toEmail: String(result.target_email || ""),
+        subject: String(result.subject || "No subject")
+    };
+
+    status.innerHTML = `
+        <div class="glass-card" style="margin-top:10px;text-align:left;border-color:#3b82f6;">
+            <h3 style="margin:0 0 10px;color:#38bdf8;font-size:1rem;">
+                📧 Review email draft
+            </h3>
+            <p style="margin:4px 0;font-size:.9rem;">
+                <strong>To:</strong> ${escapeHTML(pendingDirectEmail.toEmail)}
+            </p>
+            <p style="margin:4px 0 10px;font-size:.9rem;">
+                <strong>Subject:</strong> ${escapeHTML(pendingDirectEmail.subject)}
+            </p>
+            <label for="emailMessage" style="display:block;color:#fbbf24;margin:10px 0 6px;font-size:.9rem;font-weight:600;">
+                Proposed reply — edit before sending
+            </label>
+            <textarea id="emailMessage" maxlength="10000"
+                      style="width:100%;min-height:110px;background:#1e293b;color:#f8fafc;border:1px solid #475569;border-radius:6px;padding:8px;font:inherit;resize:vertical;">${escapeHTML(result.proposed_reply || "")}</textarea>
+            <button type="button" onclick="sendDirectEmail()"
+                    style="margin-top:12px;width:100%;background:#2563eb;color:white;border:0;padding:10px;border-radius:6px;font-weight:bold;cursor:pointer;">
+                Approve &amp; Send Email
+            </button>
+        </div>
+    `;
+}
+
+function handleContactSelection(index) {
+    const contact = currentContacts[index];
     const input = document.getElementById("userInput");
-    input.value = `Send an email to ${exactEmail}`;
+    if (!contact || !input) return;
+
+    input.value = `Send an email to ${contact.email}`;
+    autoResizeInput();
     sendPrompt();
 }
 
+/* ==========================================
+   APPROVE OR CANCEL A PLANNED ACTION
+========================================== */
+
 async function approveAction() {
+    if (!currentApprovalId || !currentPendingAction || isExecuting) return;
+
     const badge = document.getElementById("cardStatusBadge");
-    const actionsGroup = document.getElementById("cardActionsGroup");
+    const actions = document.getElementById("cardActionsGroup");
+    isExecuting = true;
 
-    if (badge) {
-        badge.style.background = "#1e3a8a";
-        badge.style.color = "#93c5fd";
-        badge.innerText = "Running... ⏳";
-    }
-
-    if (actionsGroup) {
-        actionsGroup.innerHTML = `<span style="color: #60a5fa;">Launching Playwright Engine...</span>`;
+    if (badge) badge.textContent = "Running…";
+    if (actions) {
+        actions.innerHTML =
+            '<span role="status" aria-live="polite" style="color:#93c5fd;">Running approved task…</span>';
     }
 
     try {
-        const response = await fetch("http://127.0.0.1:5000/api/execute-task", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(currentPendingAction || {})
-        });
+        const result = await postJSON(
+            "/api/execute-task",
+            { approval_id: currentApprovalId },
+            120_000
+        );
 
-        const resData = await response.json();
-
-        if (resData.success) {
-            if (badge) {
-                badge.style.background = "#064e3b";
-                badge.style.color = "#34d399";
-                badge.innerText = "Completed ✓";
-            }
-            
-            // 🛠️ FIX: Screenshot extraction (Supports direct, nested data, or data.screenshot)
-            const base64Screenshot = resData.screenshot || (resData.data && resData.data.screenshot);
-
-            if (actionsGroup) {
-                if (base64Screenshot) {
-                    actionsGroup.innerHTML = `
-                        <div style="width: 100%; margin-top: 10px;">
-                            <div style="color: #34d399; font-weight: 600; margin-bottom: 8px;">
-                                ✅ Live Browser Result:
-                            </div>
-                            <div style="border: 2px solid #334155; border-radius: 8px; overflow: hidden;">
-                                <img src="${base64Screenshot}" alt="Browser Screenshot" style="width: 100%; height: auto; display: block;" />
-                            </div>
-                        </div>
-                    `;
-                } else {
-                    actionsGroup.innerHTML = `<span style="color: #34d399; font-weight: bold;">✅ Task Executed Successfully (No screenshot captured)</span>`;
-                }
-            }
-        } else {
-            throw new Error(resData.error || "Execution failed");
+        if (!result.success) {
+            throw new Error(result.message || result.error || "Execution failed.");
         }
-    } catch (err) {
+
         if (badge) {
-            badge.style.background = "#831843";
-            badge.innerText = "Failed ❌";
+            badge.textContent = "Completed";
+            badge.style.color = "#34d399";
         }
-        if (actionsGroup) {
-            actionsGroup.innerHTML = `<span style="color: #f87171;">Error: ${escapeHTML(err.message)}</span>`;
+
+        const data = result.data || result;
+        const screenshot = safeScreenshotDataURL(data.screenshot);
+
+        if (actions && screenshot) {
+            actions.innerHTML = `
+                <div style="width:100%;margin-top:10px;">
+                    <div style="color:#34d399;font-weight:600;margin-bottom:8px;">
+                        ✅ Browser result
+                    </div>
+                    <div style="border:2px solid #334155;border-radius:8px;overflow:hidden;">
+                        <img src="${screenshot}" alt="Screenshot of the approved browser task"
+                             style="width:100%;height:auto;display:block;">
+                    </div>
+                </div>
+            `;
+        } else if (actions) {
+            actions.innerHTML =
+                '<span role="status" style="color:#34d399;font-weight:600;">✅ Task completed.</span>';
         }
+
+        currentPendingAction = null;
+        currentApprovalId = null;
+    } catch (error) {
+        if (badge) {
+            badge.textContent = "Failed";
+            badge.style.color = "#fda4af";
+        }
+
+        if (actions) {
+            actions.innerHTML =
+                `<span role="alert" style="color:#f87171;">${escapeHTML(friendlyNetworkError(error))}</span>`;
+        }
+    } finally {
+        isExecuting = false;
     }
 }
 
-function cancelAction() {
+function safeScreenshotDataURL(value) {
+    if (typeof value !== "string" || value.length > 8_000_000) return "";
+
+    return /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=_-]+$/.test(value)
+        ? value
+        : "";
+}
+
+async function cancelAction() {
+    const approvalId = currentApprovalId;
     const badge = document.getElementById("cardStatusBadge");
-    const actionsGroup = document.getElementById("cardActionsGroup");
+    const actions = document.getElementById("cardActionsGroup");
+
+    if (approvalId) {
+        try {
+            await postJSON("/api/cancel-action", { approval_id: approvalId });
+        } catch (error) {
+            showToast(friendlyNetworkError(error), 5000);
+        }
+    }
 
     if (badge) {
-        badge.style.background = "#4c0519";
+        badge.textContent = "Cancelled";
         badge.style.color = "#f87171";
-        badge.innerText = "Cancelled";
     }
 
-    if (actionsGroup) {
-        actionsGroup.innerHTML = `<span style="color: #f87171; font-weight: 600; font-size: 0.85rem;">Task Cancelled</span>`;
+    if (actions) {
+        actions.innerHTML =
+            '<span role="status" style="color:#f87171;font-weight:600;">Task cancelled.</span>';
     }
+
+    currentPendingAction = null;
+    currentApprovalId = null;
 }
 
-async function sendDirectEmail(toEmail, subject) {
-    const bodyText = document.getElementById("emailMessage").value;
-    const status = document.getElementById("demoStatus");
-    
+/* ==========================================
+   SEND A DIRECT EMAIL
+========================================== */
+
+async function sendDirectEmail() {
+    const box = document.getElementById("emailMessage");
+    if (!pendingDirectEmail || !box || isSendingEmail) return;
+
+    const body = box.value.trim();
+    if (!body) {
+        showToast("Please write a message before sending.");
+        box.focus();
+        return;
+    }
+
+    isSendingEmail = true;
+    const button = document.querySelector(
+        "#demoStatus button[onclick='sendDirectEmail()']"
+    );
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Sending…";
+    }
+
     try {
-        const res = await fetch("http://127.0.0.1:5000/api/send-email", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                to_email: toEmail, 
-                subject: subject, 
-                body: bodyText,
-                user_email: currentUser ? currentUser.email : null
-            })
+        const result = await postJSON("/api/send-email", {
+            email_id: pendingDirectEmail.emailId || null,
+            to_email: pendingDirectEmail.toEmail,
+            subject: pendingDirectEmail.subject,
+            body,
+            idempotency_key: newIdempotencyKey()
         });
-        const data = await res.json();
-        
-        if (data.status === "success" || data.success) {
-            alert("✅ Email Sent Successfully!");
-            if (status) {
-                status.innerHTML = `<div class='glass-card' style='color: #10B981;'>✅ Email sent successfully to ${escapeHTML(toEmail)}!</div>`;
-            }
-        } else {
-            alert("❌ Failed to send email: " + (data.error || "Unknown error"));
+
+        if (result.status !== "success" && !result.success) {
+            throw new Error(result.message || result.error || "Email was not sent.");
         }
-    } catch (err) {
-        alert("❌ Network Error: Server unreachable.");
+
+        const status = document.getElementById("demoStatus");
+        if (status) {
+            status.innerHTML =
+                `<div class="glass-card" role="status" style="color:#34d399;">✅ Email sent successfully to ${escapeHTML(pendingDirectEmail.toEmail)}.</div>`;
+        }
+
+        pendingDirectEmail = null;
+        showToast("✅ Email sent successfully.");
+    } catch (error) {
+        if (button) {
+            button.disabled = false;
+            button.textContent = "Approve & Send Email";
+        }
+        showToast(`❌ ${friendlyNetworkError(error)}`, 5000);
+    } finally {
+        isSendingEmail = false;
     }
 }
 
 /* ==========================================
-    CHAT HISTORY & AUTH MANAGEMENT
+   CHAT HISTORY
 ========================================== */
-function renderHistoryList() {
-    const listDiv = document.getElementById("historyList");
-    if (!listDiv) return;
-    listDiv.innerHTML = "";
 
-    chatHistory.filter(msg => msg.sender === "user").forEach(msg => {
-        const item = document.createElement("div");
-        item.className = "history-item";
-        item.innerText = "💬 " + msg.text;
-        listDiv.appendChild(item);
-    });
+function renderHistoryList() {
+    const list = document.getElementById("historyList");
+    if (!list) return;
+
+    list.replaceChildren();
+
+    chatHistory
+        .filter((message) => message && message.sender === "user")
+        .forEach((message) => {
+            const item = document.createElement("div");
+            item.className = "history-item";
+            item.textContent = `💬 ${String(message.text || "")}`;
+            list.appendChild(item);
+        });
 }
 
 function clearHistory() {
     chatHistory = [];
-    localStorage.removeItem("dopilot_history");
+
+    try {
+        localStorage.removeItem("inklur_history");
+        localStorage.removeItem("dopilot_history");
+    } catch {
+        // Storage may be disabled.
+    }
+
     renderHistoryList();
+
     const status = document.getElementById("demoStatus");
-    if (status) status.innerHTML = "<div class='glass-card'>Started a fresh new conversation!</div>";
+    if (status) {
+        status.style.display = "block";
+        status.innerHTML =
+            '<div class="glass-card" role="status">Started a fresh conversation.</div>';
+    }
+}
+
+/* ==========================================
+   LOGIN / SIGNUP MODAL
+========================================== */
+
+
+function initModalControls() {
+    const modal = document.getElementById("authModal");
+    if (!modal) return;
+
+    modal.addEventListener("click", (event) => {
+        if (event.target === modal) closeAuthModal();
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (modal.getAttribute("aria-hidden") === "true") return;
+        if (event.key === "Escape") {
+            closeAuthModal();
+            return;
+        }
+        if (event.key !== "Tab") return;
+
+        const controls = modal.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), a[href], textarea:not([disabled])'
+        );
+        if (!controls.length) {
+            event.preventDefault();
+            modal.focus();
+            return;
+        }
+
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
 }
 
 function openAuthModal(mode) {
     const modal = document.getElementById("authModal");
-    if (modal) {
-        modal.style.display = "flex";
-        toggleAuthMode(mode);
-    }
+    if (!modal) return;
+
+    previousFocus = document.activeElement;
+    modal.style.display = "flex";
+    modal.setAttribute("aria-hidden", "false");
+    toggleAuthMode(mode || "login");
+
+    const selector = mode === "signup" ? "#signupName" : "#loginEmail";
+    setTimeout(() => modal.querySelector(selector)?.focus(), 0);
 }
 
 function closeAuthModal() {
     const modal = document.getElementById("authModal");
-    if (modal) {
-        modal.style.display = "none";
-        clearAuthAlert();
+    if (!modal) return;
+
+    modal.style.display = "none";
+    modal.setAttribute("aria-hidden", "true");
+    clearAuthAlert();
+
+    if (previousFocus && typeof previousFocus.focus === "function") {
+        previousFocus.focus();
     }
 }
 
 function toggleAuthMode(mode) {
-    const loginBox = document.getElementById("loginFormContainer");
-    const signupBox = document.getElementById("signupFormContainer");
-    clearAuthAlert();
+    const modal = document.getElementById("authModal");
+    const login = document.getElementById("loginFormContainer");
+    const signup = document.getElementById("signupFormContainer");
+    if (!login || !signup) return;
 
-    if (mode === "login") {
-        loginBox.style.display = "block";
-        signupBox.style.display = "none";
-    } else {
-        loginBox.style.display = "none";
-        signupBox.style.display = "block";
-    }
+    const isLogin = mode === "login";
+    login.style.display = isLogin ? "block" : "none";
+    signup.style.display = isLogin ? "none" : "block";
+    modal?.setAttribute("aria-labelledby", isLogin ? "loginHeading" : "signupHeading");
+    clearAuthAlert();
 }
 
 function showAuthAlert(msg, isError = true) {
@@ -565,9 +1269,10 @@ function clearAuthAlert() {
     if (alertBox) alertBox.innerText = "";
 }
 
-async function handleLogin() {
-    const email = document.getElementById("loginEmail").value.trim();
-    const password = document.getElementById("loginPassword").value;
+async function handleLogin(event) {
+    event?.preventDefault();
+    const email = document.getElementById("loginEmail")?.value.trim() || "";
+    const password = document.getElementById("loginPassword")?.value || "";
 
     if (!email || !password) {
         showAuthAlert("Please enter both email and password.");
@@ -575,83 +1280,80 @@ async function handleLogin() {
     }
 
     try {
-        const response = await fetch("http://127.0.0.1:5000/api/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email: email, password: password })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            currentUser = data.user;
-            localStorage.setItem("dopilot_user", JSON.stringify(currentUser));
-            showAuthAlert("Login Successful!", false);
-            setTimeout(() => {
-                closeAuthModal();
-                updateNavUI();
-            }, 1000);
-        } else {
+        const data = await postJSON("/api/login", { email, password }, 20000);
+        if (!data.success || !data.user) {
             showAuthAlert(data.message || "Invalid credentials.");
+            return;
         }
-    } catch (err) {
-        console.error(err);
-        showAuthAlert("Could not connect to Python backend.");
+
+        savePublicUser(data.user);
+        showAuthAlert("Login successful.", false);
+        updateNavUI();
+        startEmailPolling();
+        setTimeout(closeAuthModal, 500);
+    } catch (error) {
+        showAuthAlert(friendlyNetworkError(error));
     }
 }
 
-async function handleSignup() {
-    const name = document.getElementById("signupName").value.trim();
-    const email = document.getElementById("signupEmail").value.trim();
-    const password = document.getElementById("signupPassword").value;
+async function handleSignup(event) {
+    event?.preventDefault();
+    const name = document.getElementById("signupName")?.value.trim() || "";
+    const email = document.getElementById("signupEmail")?.value.trim() || "";
+    const password = document.getElementById("signupPassword")?.value || "";
 
     if (!name || !email || !password) {
         showAuthAlert("All fields are required.");
         return;
     }
+    if (password.length < 12) {
+        showAuthAlert("Use a password with at least 12 characters.");
+        return;
+    }
 
     try {
-        const response = await fetch("http://127.0.0.1:5000/api/signup", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: name, email: email, password: password })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            showAuthAlert("Account created! Switching to Login...", false);
-            setTimeout(() => {
-                toggleAuthMode("login");
-                document.getElementById("loginEmail").value = email;
-            }, 1500);
-        } else {
+        const data = await postJSON("/api/signup", { name, email, password }, 20000);
+        if (!data.success) {
             showAuthAlert(data.message || "Signup failed.");
+            return;
         }
-    } catch (err) {
-        console.error(err);
-        showAuthAlert("Could not connect to Python backend.");
+
+        showAuthAlert("Account created. You can now log in.", false);
+        toggleAuthMode("login");
+        const loginEmail = document.getElementById("loginEmail");
+        if (loginEmail) {
+            loginEmail.value = email;
+            loginEmail.focus();
+        }
+    } catch (error) {
+        showAuthAlert(friendlyNetworkError(error));
     }
 }
 
-function handleLogout() {
-    currentUser = null;
-    localStorage.removeItem("dopilot_user");
+async function handleLogout() {
+    stopEmailPolling();
+    try {
+        await postJSON("/api/logout", {});
+    } catch {
+        // Clear local UI state even if the server is unavailable.
+    }
+
+    clearPublicUser();
+    pendingIncomingEmail = null;
+    pendingDirectEmail = null;
+    currentPendingAction = null;
+    currentApprovalId = null;
     updateNavUI();
+    showToast("👋 You've been logged out.");
 }
 
-// Hover & Click supported dropdown toggler
 function toggleProfileDropdown(event, forceState) {
     if (event) event.stopPropagation();
     const dropdown = document.getElementById("profileDropdown");
     if (!dropdown) return;
 
     if (typeof forceState === "boolean") {
-        if (forceState) {
-            dropdown.classList.add("show");
-        } else {
-            dropdown.classList.remove("show");
-        }
+        dropdown.classList.toggle("show", forceState);
     } else {
         dropdown.classList.toggle("show");
     }
@@ -671,14 +1373,14 @@ function updateNavUI() {
     if (currentUser) {
         navContainer.innerHTML = `
             <div class="profile-menu-container" onmouseenter="toggleProfileDropdown(event, true)" onmouseleave="toggleProfileDropdown(event, false)">
-                <div class="profile-badge" onclick="toggleProfileDropdown(event)">
-                    <span>👤 ${escapeHTML(currentUser.name || 'User')}</span>
+                <div class="profile-badge" onclick="toggleProfileDropdown(event, true)">
+                    <span>👤 ${escapeHTML(currentUser.name || "User")}</span>
                     <span style="font-size: 0.7rem; color: #94a3b8;">▼</span>
                 </div>
-                
+
                 <div class="profile-dropdown" id="profileDropdown">
                     <button onclick="openProfileSettings()">✏️ Edit Profile</button>
-                    <button onclick="selectPlan('Pro Plan')">⚡ Upgrade Plan</button>
+                    <button onclick="joinEarlyAccess('Early Access')">⚡ Early Access</button>
                     <button class="logout-btn" onclick="handleLogout()">🚪 Logout</button>
                 </div>
             </div>
@@ -693,14 +1395,7 @@ function updateNavUI() {
 }
 
 function openProfileSettings() {
-    alert("✏️ Edit profile feature coming soon!");
-}
-
-function escapeHTML(text) {
-    if (!text) return "";
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
+    showToast("✏️ Edit profile feature coming soon!");
 }
 
 function togglePasswordVisibility(inputId, btn) {
