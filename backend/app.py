@@ -458,7 +458,7 @@ def call_llm_json(prompt):
             if choices:
                 text = (choices[0].get("message") or {}).get("content") or ""
         else:
-            model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+            model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
             if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
                 return None, "GEMINI_MODEL has an invalid value."
             response = requests.post(
