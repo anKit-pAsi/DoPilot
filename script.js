@@ -2,7 +2,7 @@
    INKLUR CONFIG
 ========================================== */
 
-const API_BASE = "http://127.0.0.1:5000";
+const API_BASE = "";
 const CONTACT_EMAIL = "build@inklur.ai";
 const MAX_HISTORY_ITEMS = 40;
 const EMAIL_POLL_INTERVAL_MS = 60_000;
