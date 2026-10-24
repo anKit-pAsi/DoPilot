@@ -17,7 +17,7 @@ from contextlib import closing
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -50,6 +50,17 @@ from automation_engine import AutomationError, run_browser_automation  # noqa: E
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY") or secrets.token_hex(32)
+
+# Parent directory (DoPilot root folder jahan index.html hai)
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+@app.route('/')
+def serve_index():
+    return send_from_directory(ROOT_DIR, 'index.html')
+
+@app.route('/<path:filename>')
+def serve_static_files(filename):
+    return send_from_directory(ROOT_DIR, filename)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("inklur")
