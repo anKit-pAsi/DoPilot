@@ -463,19 +463,20 @@ def call_llm_json(prompt):
             model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
             if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
                 return None, "GEMINI_MODEL has an invalid value."
+            
+            # FIXED: Updated Gemini API payload format for stable v1beta support
             response = requests.post(
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                + model + ":generateContent",
-                headers={"x-goog-api-key": str(key or ""), "Content-Type": "application/json"},  # type: ignore[arg-type]
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": str(key or ""), "Content-Type": "application/json"},
                 json={
-                    "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+                    "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
                 },
                 timeout=30,
             )
             if response.status_code != 200:
-                logger.warning("Gemini request failed (HTTP %s).", response.status_code)
+                logger.warning("Gemini request failed (HTTP %s): %s", response.status_code, response.text)
                 return None, "The AI service could not process this request right now."
             candidates = response.json().get("candidates") or []
             text = ""
