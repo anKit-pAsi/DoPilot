@@ -1009,22 +1009,21 @@ async function approveAction() {
 
         const data = result.data || result;
         const screenshot = safeScreenshotDataURL(result.screenshot || data.screenshot);
+        const answer = String(data.answer || "").trim();
 
-        if (actions && screenshot) {
+        if (actions && (screenshot || answer)) {
             actions.innerHTML = `
                 <div style="width:100%;margin-top:10px;">
                     <div style="color:#34d399;font-weight:600;margin-bottom:8px;">
                         ✅ Browser result
                     </div>
-                    <div style="border:2px solid #334155;border-radius:8px;overflow:hidden;">
-                        <img src="${screenshot}" alt="Screenshot of the approved browser task"
-                             style="width:100%;height:auto;display:block;">
-                    </div>
+                    ${answer ? `<div style="padding:12px;margin-bottom:10px;border:1px solid #334155;border-radius:8px;white-space:pre-wrap;color:inherit;">${escapeHTML(answer)}</div>` : ""}
+                    ${screenshot ? `<div style="border:2px solid #334155;border-radius:8px;overflow:hidden;"><img src="${screenshot}" alt="Screenshot of the approved browser task" style="width:100%;height:auto;display:block;"></div>` : ""}
                 </div>
             `;
         } else if (actions) {
             actions.innerHTML =
-                '<span role="status" style="color:#34d399;font-weight:600;">✅ Task completed.</span>';
+                '<span role="status" style="color:#34d399;font-weight:600;">✅ Task completed, but no page answer was returned.</span>';
         }
 
         currentPendingAction = null;

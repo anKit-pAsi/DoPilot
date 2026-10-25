@@ -307,6 +307,12 @@ async def execute_single_browser(preferred_url, search_query):
                     page_title = "Inklur Browser Task"
 
                 final_url = page.url
+                try:
+                    page_text = await page.locator("body").inner_text(timeout=3000)
+                    page_text = str(page_text)[:6000]
+                except Exception:
+                    page_text = ""
+
                 screenshot = await page.screenshot(
                     type="jpeg",
                     quality=70,
@@ -321,6 +327,7 @@ async def execute_single_browser(preferred_url, search_query):
                     "engine": "Playwright-Chromium",
                     "page_title": str(page_title)[:200],
                     "target_url": final_url,
+                    "page_text": page_text,
                     "screenshot": "data:image/jpeg;base64," + screenshot_data,
                     "message": "Public page opened and screenshot captured.",
                 }
