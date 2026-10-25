@@ -1008,7 +1008,7 @@ async function approveAction() {
         }
 
         const data = result.data || result;
-        const screenshot = safeScreenshotDataURL(data.screenshot);
+        const screenshot = safeScreenshotDataURL(result.screenshot || data.screenshot);
 
         if (actions && screenshot) {
             actions.innerHTML = `
