@@ -761,8 +761,7 @@ def send_email_direct(
             thread_id = original.get("threadId")
             if thread_id:
                 send_body["threadId"] = thread_id
-        elif not final_subject.casefold().startswith("re:"):
-            final_subject = "Re: " + final_subject
+
 
         message = MIMEText(body, "plain", "utf-8")
         message["To"] = recipient

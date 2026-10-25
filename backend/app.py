@@ -231,6 +231,21 @@ def init_db():
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_api_sessions_expiry ON api_sessions(expires_at)"
         )
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS pending_approvals (
+                approval_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                action_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pending_approvals_user_status
+            ON pending_approvals(user_id, status)
+        """)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS app_migrations (
@@ -238,6 +253,7 @@ def init_db():
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
+
         )
         connection.commit()
         migrate_legacy_accounts(connection)
@@ -665,13 +681,43 @@ def execute():
         return json_message(error_message or "Invalid response from AI.", 502)
 
     action_required = parsed.get("action_required") is True
+    approval_id = None
 
     if action_required:
+        user = current_user()
+        if user is None:
+            return auth_required()
+
         parsed["tool_name"] = "web_automation"
         parsed["action_required"] = True
-        parsed["parameters"] = normalize_web_parameters(parsed.get("parameters"), prompt)
+        parsed["parameters"] = normalize_web_parameters(
+            parsed.get("parameters"), prompt
+        )
         parsed.setdefault("action_title", "Search public web")
         parsed.setdefault("message", "Review and approve this public web search.")
+
+        approval_id = secrets.token_urlsafe(32)
+        now = int(time.time())
+        expires_at = now + 600
+
+        with closing(connect_db()) as connection:
+            connection.execute(
+                """
+                INSERT INTO pending_approvals
+                    (approval_id, user_id, action_json, created_at, expires_at, status)
+                VALUES (?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    approval_id,
+                    user["id"],
+                    json.dumps(parsed),
+                    now,
+                    expires_at,
+                ),
+            )
+            connection.commit()
+
+        parsed["approval_id"] = approval_id
         result_text = str(parsed["message"])
     else:
         parsed["action_required"] = False
@@ -683,46 +729,130 @@ def execute():
         "action_required": action_required,
         "tool_name": parsed.get("tool_name"),
         "parsed_action": parsed,
+        "approval_id": approval_id,
         "result": result_text,
     })
 
 
 # ==========================================
-#  BROWSER TASK (sirf approve hone ke baad)
+# BROWSER TASK (valid approval required)
 # ==========================================
 @app.post("/api/execute-task")
 @app.post("/api/run-action")
 def handle_realtime_execution():
-    if current_user() is None:
+    user = current_user()
+    if user is None:
         return auth_required()
 
     data = json_body()
-    if data.get("tool_name") not in (None, "web_automation"):
-        return json_message("Unsupported approved action.")
+    approval_id = str(data.get("approval_id") or "").strip()
 
-    target_url = "https://www.google.com"
-    query = "Inklur AI"
-    parameters = data.get("parameters", [])
-
-    if isinstance(parameters, list):
-        for parameter in parameters:
-            if not isinstance(parameter, dict):
-                continue
-            label = str(parameter.get("label") or "").strip().casefold()
-            value = str(parameter.get("value") or "").strip()
-            if label == "url" and value:
-                target_url = value[:2048]
-            elif label in {"query", "search query"} and value:
-                query = value[:500]
+    if not approval_id or len(approval_id) > 200:
+        return json_message("A valid approval ID is required.", 400)
 
     if not browser_lock.acquire(blocking=False):
-        return json_message("Another browser task is running. Please wait and try again.", 429)
+        return json_message(
+            "Another browser task is running. Please wait and try again.",
+            429,
+        )
 
     try:
+        with closing(connect_db()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+
+            approval = connection.execute(
+                """
+                SELECT action_json, expires_at, status
+                FROM pending_approvals
+                WHERE approval_id = ? AND user_id = ?
+                """,
+                (approval_id, user["id"]),
+            ).fetchone()
+
+            if approval is None:
+                connection.rollback()
+                return json_message(
+                    "Approval not found or not available to this account.", 403
+                )
+
+            if approval["status"] != "pending":
+                connection.rollback()
+                return json_message(
+                    "This approval has already been used or cancelled.", 409
+                )
+
+            now = int(time.time())
+
+            if int(approval["expires_at"]) <= now:
+                connection.execute(
+                    """
+                    UPDATE pending_approvals
+                    SET status = 'expired'
+                    WHERE approval_id = ? AND user_id = ? AND status = 'pending'
+                    """,
+                    (approval_id, user["id"]),
+                )
+                connection.commit()
+                return json_message("Approval expired. Please create a new task.", 410)
+
+            try:
+                action = json.loads(approval["action_json"])
+            except (TypeError, ValueError):
+                connection.rollback()
+                return json_message("Saved approval data is invalid.", 500)
+
+            if (
+                not isinstance(action, dict)
+                or action.get("action_required") is not True
+                or action.get("tool_name") != "web_automation"
+            ):
+                connection.rollback()
+                return json_message("Unsupported approved action.", 400)
+
+            updated = connection.execute(
+                """
+                UPDATE pending_approvals
+                SET status = 'approved'
+                WHERE approval_id = ? AND user_id = ? AND status = 'pending'
+                """,
+                (approval_id, user["id"]),
+            )
+
+            if updated.rowcount != 1:
+                connection.rollback()
+                return json_message("Approval is no longer available.", 409)
+
+            connection.commit()
+
+        target_url = "https://www.google.com"
+        query = "Inklur AI"
+        parameters = action.get("parameters", [])
+
+        if isinstance(parameters, list):
+            for parameter in parameters:
+                if not isinstance(parameter, dict):
+                    continue
+
+                label = str(parameter.get("label") or "").strip().casefold()
+                value = str(parameter.get("value") or "").strip()
+
+                if label == "url" and value:
+                    target_url = value[:2048]
+                elif label in {"query", "search query"} and value:
+                    query = value[:500]
+
         result = run_browser_automation(target_url, query)
         screenshot = result.get("screenshot")
-        details = {key: value for key, value in result.items() if key != "screenshot"}
-        return jsonify({"success": True, "screenshot": screenshot, "data": details})
+        details = {
+            key: value for key, value in result.items()
+            if key != "screenshot"
+        }
+
+        return jsonify({
+            "success": True,
+            "screenshot": screenshot,
+            "data": details,
+        })
 
     except AutomationError as error:
         return json_message(str(error), 400)
@@ -731,6 +861,39 @@ def handle_realtime_execution():
         return json_message("Browser task could not be completed.", 500)
     finally:
         browser_lock.release()
+
+
+@app.post("/api/cancel-action")
+def cancel_action():
+    user = current_user()
+    if user is None:
+        return auth_required()
+
+    data = json_body()
+    approval_id = str(data.get("approval_id") or "").strip()
+
+    if not approval_id or len(approval_id) > 200:
+        return json_message("A valid approval ID is required.", 400)
+
+    with closing(connect_db()) as connection:
+        result = connection.execute(
+            """
+            UPDATE pending_approvals
+            SET status = 'cancelled'
+            WHERE approval_id = ?
+              AND user_id = ?
+              AND status = 'pending'
+            """,
+            (approval_id, user["id"]),
+        )
+        connection.commit()
+
+    if result.rowcount != 1:
+        return json_message(
+            "Approval not found, expired, cancelled, or already used.", 409
+        )
+
+    return jsonify({"success": True, "message": "Approval cancelled."})
 
 
 # ==========================================

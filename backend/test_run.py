@@ -132,16 +132,47 @@ class InklurApiTests(unittest.TestCase):
 
     def test_browser_task_runs_for_logged_in_user(self):
         self.signup_and_login()
-        fake = {"status": "success", "screenshot": "data:image/jpeg;base64,AAAA"}
-        with mock.patch.object(inklur, "run_browser_automation", return_value=fake):
-            response = self.client.post("/api/execute-task", json={
-                "parameters": [{"label": "Query", "value": "test"}],
-            })
+
+        plan = {
+            "action_required": True,
+            "tool_name": "web_automation",
+            "action_title": "Search public web",
+            "message": "Review",
+            "parameters": [{"label": "Query", "value": "test"}],
+        }
+
+        with mock.patch.object(
+            inklur, "call_llm_json", return_value=(plan, None)
+        ):
+            approval_response = self.client.post(
+                "/api/execute",
+                json={"prompt": "web par test search karo"},
+            )
+
+        self.assertEqual(approval_response.status_code, 200)
+        approval_data = approval_response.get_json()
+        approval_id = approval_data["approval_id"]
+        self.assertTrue(approval_id)
+
+        fake = {
+            "status": "success",
+            "screenshot": "data:image/jpeg;base64,AAAA",
+        }
+
+        with mock.patch.object(
+            inklur, "run_browser_automation", return_value=fake
+        ) as browser:
+            response = self.client.post(
+                "/api/execute-task",
+                json={"approval_id": approval_id},
+            )
+
         data = response.get_json()
+        self.assertEqual(response.status_code, 200)
         self.assertTrue(data["success"])
         self.assertEqual(data["screenshot"], "data:image/jpeg;base64,AAAA")
         self.assertNotIn("screenshot", data["data"])
-
+        browser.assert_called_once()
     def test_check_email_requires_login(self):
         response = self.client.post("/api/check-email-notifications", json={})
         self.assertEqual(response.status_code, 401)
