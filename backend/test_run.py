@@ -24,11 +24,49 @@ os.environ["OPENROUTER_API_KEY"] = ""
 
 sys.path.insert(0, str(PROJECT_DIR))
 import app as inklur  # noqa: E402
+from automation_engine import _submitted_values_visible  # noqa: E402
 
 PASSWORD = "safe-test-password-123"
 
 
 class InklurApiTests(unittest.TestCase):
+    def test_submission_verification_accepts_values_and_new_confirmation(self):
+        before = "Form ready"
+        after = "Inklur Test User inklur.test@example.com Mirzapur, Uttar Pradesh Thanks for submitting"
+        self.assertTrue(_submitted_values_visible(
+            before, after,
+            ["Inklur Test User", "inklur.test@example.com", "Mirzapur, Uttar Pradesh"],
+            "Thanks for submitting",
+        ))
+
+    def test_submission_verification_rejects_missing_value(self):
+        before = "Form ready"
+        after = "Inklur Test User inklur.test@example.com Thanks for submitting"
+        self.assertFalse(_submitted_values_visible(
+            before, after,
+            ["Inklur Test User", "inklur.test@example.com", "Mirzapur, Uttar Pradesh"],
+            "Thanks for submitting",
+        ))
+
+    def test_submission_verification_rejects_confirmation_already_visible(self):
+        before = "Thanks for submitting"
+        after = "Inklur Test User inklur.test@example.com Thanks for submitting"
+        self.assertFalse(_submitted_values_visible(
+            before, after, ["Inklur Test User", "inklur.test@example.com"],
+            "Thanks for submitting",
+        ))
+
+    def test_submission_verification_allows_preexisting_field_values_if_confirmation_is_new(self):
+        before = "Option Inklur Test User"
+        after = "Option Inklur Test User Thanks for submitting"
+        self.assertTrue(_submitted_values_visible(
+            before, after, ["Inklur Test User"], "Thanks for submitting",
+        ))
+
+    def test_submission_verification_rejects_empty_values(self):
+        self.assertFalse(_submitted_values_visible("Before", "After", [], "Thanks"))
+
+
     def setUp(self):
         inklur.app.config.update(TESTING=True)
         self.client = inklur.app.test_client()
@@ -200,6 +238,67 @@ class InklurApiTests(unittest.TestCase):
             "to_email": "bob@example.com", "subject": "Hi", "body": "Hello",
         })
         self.assertEqual(response.status_code, 401)
+
+    def test_send_email_without_approval_is_blocked(self):
+        self.signup_and_login()
+        with mock.patch.object(inklur.gmail_engine, "send_email_direct") as sender:
+            response = self.client.post("/api/send-email", json={
+                "to_email": "bob@example.com",
+                "subject": "Hi",
+                "body": "Hello",
+            })
+        self.assertEqual(response.status_code, 403)
+        sender.assert_not_called()
+
+    def test_email_approval_rejects_changed_content(self):
+        self.signup_and_login()
+        content = {
+            "to_email": "bob@example.com",
+            "subject": "Approved subject",
+            "body": "Approved body",
+            "email_id": None,
+        }
+        approval = self.client.post("/api/approve-email-send", json=content)
+        self.assertEqual(approval.status_code, 200)
+        approval_id = approval.get_json()["approval_id"]
+
+        changed = dict(content)
+        changed["body"] = "Changed after approval"
+        with mock.patch.object(inklur.gmail_engine, "send_email_direct") as sender:
+            response = self.client.post("/api/send-email", json={
+                **changed, "approval_id": approval_id,
+            })
+        self.assertEqual(response.status_code, 403)
+        sender.assert_not_called()
+
+    def test_email_approval_can_only_be_used_once(self):
+        self.signup_and_login()
+        content = {
+            "to_email": "bob@example.com",
+            "subject": "One-time test",
+            "body": "Test body",
+            "email_id": None,
+        }
+        approval = self.client.post("/api/approve-email-send", json=content)
+        self.assertEqual(approval.status_code, 200)
+        approval_id = approval.get_json()["approval_id"]
+
+        with mock.patch.object(
+            inklur.gmail_engine,
+            "send_email_direct",
+            return_value={"status": "success"},
+        ) as sender:
+            first = self.client.post("/api/send-email", json={
+                **content, "approval_id": approval_id,
+            })
+            second = self.client.post("/api/send-email", json={
+                **content, "approval_id": approval_id,
+            })
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(sender.call_count, 1)
+
 
     def test_unknown_endpoint_returns_json(self):
         response = self.client.get("/api/does-not-exist")

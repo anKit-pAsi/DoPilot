@@ -327,7 +327,7 @@ def _call_openrouter(api_key, system_instruction, user_content):
 
 
 def _call_gemini(api_key, system_instruction, user_content):
-    model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     response = requests.post(
         url,
