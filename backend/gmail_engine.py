@@ -327,7 +327,7 @@ def _call_openrouter(api_key, system_instruction, user_content):
 
 
 def _call_gemini(api_key, system_instruction, user_content):
-    model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     response = requests.post(
         url,
@@ -358,22 +358,16 @@ def _call_gemini(api_key, system_instruction, user_content):
 
 
 def ask_llm_for_reply(system_instruction, user_content):
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY")
-
-    # Backward compatibility when the OpenRouter key was stored in GEMINI_API_KEY.
-    if not openrouter_key and gemini_key and gemini_key.startswith("sk-or-"):
-        openrouter_key = gemini_key
-        gemini_key = None
+    # Inklur uses Gemini only; legacy OpenRouter keys are ignored.
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not gemini_key or gemini_key.startswith("sk-or-"):
+        return None
 
     try:
-        if openrouter_key:
-            return _call_openrouter(openrouter_key, system_instruction, user_content)
-        if gemini_key:
-            return _call_gemini(gemini_key, system_instruction, user_content)
+        return _call_gemini(gemini_key, system_instruction, user_content)
     except Exception as error:
-        log(f"AI reply-draft request failed ({type(error).__name__}).")
-    return None
+        log(f"Gemini reply-draft request failed ({type(error).__name__}).")
+        return None
 
 
 def generate_friendly_reply_with_gemini(sender_name, email_subject, email_snippet):
@@ -761,8 +755,7 @@ def send_email_direct(
             thread_id = original.get("threadId")
             if thread_id:
                 send_body["threadId"] = thread_id
-        elif not final_subject.casefold().startswith("re:"):
-            final_subject = "Re: " + final_subject
+
 
         message = MIMEText(body, "plain", "utf-8")
         message["To"] = recipient

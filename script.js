@@ -680,6 +680,8 @@ async function approveAndSendEmail() {
     if (!email?.emailId || !box || isSendingEmail) return;
 
     const body = box.value.trim();
+    const toEmail = String(email.email || "").trim();
+    const subject = String(email.subject || "No Subject").trim().slice(0, 200);
     if (!body) {
         showToast("Please add a reply before sending.");
         box.focus();
@@ -689,15 +691,29 @@ async function approveAndSendEmail() {
     isSendingEmail = true;
     if (actions) {
         actions.innerHTML =
-            '<span role="status" aria-live="polite" style="color:#93c5fd;">Sending reply…</span>';
+            '<span role="status" aria-live="polite" style="color:#93c5fd;">Requesting approval…</span>';
     }
 
     try {
-        const result = await postJSON("/api/send-email", {
+        const content = {
             email_id: email.emailId,
-            to_email: email.email,
-            subject: email.subject,
-            body,
+            to_email: toEmail,
+            subject: subject || "No Subject",
+            body
+        };
+        const approval = await postJSON("/api/approve-email-send", content);
+        if (!approval.success || !approval.approval_id) {
+            throw new Error(approval.message || "Email approval could not be created.");
+        }
+
+        if (actions) {
+            actions.innerHTML =
+                '<span role="status" aria-live="polite" style="color:#93c5fd;">Sending approved reply…</span>';
+        }
+
+        const result = await postJSON("/api/send-email", {
+            ...content,
+            approval_id: approval.approval_id,
             idempotency_key: newIdempotencyKey()
         });
 
@@ -720,42 +736,14 @@ async function approveAndSendEmail() {
     }
 }
 
-function removeEmailCard() {
-    document.getElementById("incomingEmailCard")?.remove();
-    pendingIncomingEmail = null;
-}
-
-function showEmailCardError(error) {
-    const actions = document.getElementById("emailCardActions");
-    const message = escapeHTML(friendlyNetworkError(error));
-
-    if (actions) {
-        actions.innerHTML = `<span role="alert" style="color:#f87171;">${message}</span>`;
-    } else {
-        showToast(friendlyNetworkError(error), 5000);
-    }
-}
-
-/* ==========================================
-   PROMPT EXECUTION & RESPONSE
-========================================== */
-
-function setExecuting(state) {
-    isExecuting = state;
-    const button = document.querySelector(".send-btn");
-
-    if (button) {
-        button.disabled = state;
-        button.textContent = state ? "Working… ⏳" : "Execute 🚀";
-    }
-}
-
 async function sendPrompt() {
     if (isExecuting) return;
 
     const input = document.getElementById("userInput");
     const status = document.getElementById("demoStatus");
+    const executeButton = document.querySelector(".send-btn");
     if (!input || !status) return;
+    if (!executeButton) return;
 
     const text = input.value.trim();
     status.style.display = "block";
@@ -769,7 +757,9 @@ async function sendPrompt() {
 
     status.innerHTML =
         '<div class="glass-card" role="status" aria-live="polite">⏳ Inklur is analyzing your task…</div>';
-    setExecuting(true);
+    isExecuting = true;
+    executeButton.disabled = true;
+    executeButton.textContent = "⏳ Working…";
 
     try {
         const result = await postJSON(
@@ -808,7 +798,9 @@ async function sendPrompt() {
         status.innerHTML =
             `<div class="glass-card" role="alert">❌ ${escapeHTML(friendlyNetworkError(error))}</div>`;
     } finally {
-        setExecuting(false);
+        isExecuting = false;
+        executeButton.disabled = false;
+        executeButton.textContent = "Execute 🚀";
     }
 }
 
@@ -1002,29 +994,100 @@ async function approveAction() {
             throw new Error(result.message || result.error || "Execution failed.");
         }
 
+        const data = result.data || result;
+
+        // Stage 1: show verified values and request separate submission approval.
+        if (result.requires_submit_approval && result.submit_approval_id) {
+            const preview = Array.isArray(data.form_preview) ? data.form_preview : [];
+            const seenFields = new Set();
+
+            const validPreview =
+                preview.length >= 1 &&
+                preview.length <= 10 &&
+                preview.every(item => {
+                    if (
+                        !item ||
+                        item.verified !== true ||
+                        typeof item.field !== "string" ||
+                        !item.field.trim() ||
+                        typeof item.value !== "string" ||
+                        seenFields.has(item.field)
+                    ) {
+                        return false;
+                    }
+
+                    seenFields.add(item.field);
+                    return true;
+                });
+
+            if (!validPreview) {
+                throw new Error("Form values could not be verified. Submission is blocked.");
+            }
+
+            currentApprovalId = result.submit_approval_id;
+            currentPendingAction = {
+                stage: result.submit_stage || "demoqa_submit",
+                tool_name: "web_automation"
+            };
+
+            if (badge) {
+                badge.textContent = "Review required";
+                badge.style.color = "#fbbf24";
+            }
+
+            const previewHtml = preview.map(item => `
+                <div style="padding:9px;margin:7px 0;border:1px solid #334155;border-radius:7px;">
+                    <div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">${escapeHTML(item.field)}</div>
+                    <div style="white-space:pre-wrap;overflow-wrap:anywhere;">${escapeHTML(String(item.value))}</div>
+                    <div style="font-size:12px;color:#34d399;margin-top:4px;">✓ Verified</div>
+                </div>
+            `).join("");
+
+            const screenshot = safeScreenshotDataURL(result.screenshot || data.screenshot);
+
+            if (actions) {
+                actions.innerHTML = `
+                    <div style="width:100%;margin-top:10px;">
+                        <div style="font-weight:600;color:#fbbf24;margin-bottom:8px;">
+                            Review before submitting
+                        </div>
+                        <p>These fields have been filled and verified. Nothing has been submitted yet.</p>
+                        ${previewHtml}
+                        ${screenshot ? `<div style="border:1px solid #334155;border-radius:8px;overflow:hidden;margin:10px 0;"><img src="${screenshot}" alt="Verified form preview" style="width:100%;height:auto;display:block;"></div>` : ""}
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                            <button type="button" onclick="approveAction()" style="padding:10px 14px;border:0;border-radius:7px;background:#16a34a;color:white;cursor:pointer;">Approve &amp; Submit</button>
+                            <button type="button" onclick="cancelAction()" style="padding:10px 14px;border:1px solid #64748b;border-radius:7px;background:transparent;color:inherit;cursor:pointer;">Cancel</button>
+                        </div>
+                    </div>
+                `;
+            }
+
+            return;
+        }
+
         if (badge) {
             badge.textContent = "Completed";
             badge.style.color = "#34d399";
         }
 
-        const data = result.data || result;
-        const screenshot = safeScreenshotDataURL(data.screenshot);
+        const screenshot = safeScreenshotDataURL(result.screenshot || data.screenshot);
+        const answer = String(data.answer || "").trim();
+        const pageInfo = `Page: ${String(data.page_title || "Unknown")}\nURL: ${String(data.target_url || "Unknown")}`;
 
-        if (actions && screenshot) {
+        if (actions && (screenshot || answer)) {
             actions.innerHTML = `
                 <div style="width:100%;margin-top:10px;">
                     <div style="color:#34d399;font-weight:600;margin-bottom:8px;">
                         ✅ Browser result
                     </div>
-                    <div style="border:2px solid #334155;border-radius:8px;overflow:hidden;">
-                        <img src="${screenshot}" alt="Screenshot of the approved browser task"
-                             style="width:100%;height:auto;display:block;">
-                    </div>
+                    <div style="padding:10px;margin-bottom:10px;border:1px solid #334155;border-radius:8px;white-space:pre-wrap;color:inherit;">${escapeHTML(pageInfo)}</div>
+                    ${answer ? `<div style="padding:12px;margin-bottom:10px;border:1px solid #334155;border-radius:8px;white-space:pre-wrap;color:inherit;">${escapeHTML(answer)}</div>` : ""}
+                    ${screenshot ? `<div style="border:2px solid #334155;border-radius:8px;overflow:hidden;"><img src="${screenshot}" alt="Screenshot of the approved browser task" style="width:100%;height:auto;display:block;"></div>` : ""}
                 </div>
             `;
         } else if (actions) {
             actions.innerHTML =
-                '<span role="status" style="color:#34d399;font-weight:600;">✅ Task completed.</span>';
+                '<span role="status" style="color:#34d399;font-weight:600;">✅ Task completed, but no page answer was returned.</span>';
         }
 
         currentPendingAction = null;
@@ -1100,15 +1163,27 @@ async function sendDirectEmail() {
     );
     if (button) {
         button.disabled = true;
-        button.textContent = "Sending…";
+        button.textContent = "Requesting approval…";
     }
 
     try {
-        const result = await postJSON("/api/send-email", {
+        const content = {
             email_id: pendingDirectEmail.emailId || null,
-            to_email: pendingDirectEmail.toEmail,
-            subject: pendingDirectEmail.subject,
-            body,
+            to_email: String(pendingDirectEmail.toEmail || "").trim(),
+            subject: String(pendingDirectEmail.subject || "No Subject").trim().slice(0, 200) || "No Subject",
+            body
+        };
+
+        const approval = await postJSON("/api/approve-email-send", content);
+        if (!approval.success || !approval.approval_id) {
+            throw new Error(approval.message || "Email approval could not be created.");
+        }
+
+        if (button) button.textContent = "Sending approved email…";
+
+        const result = await postJSON("/api/send-email", {
+            ...content,
+            approval_id: approval.approval_id,
             idempotency_key: newIdempotencyKey()
         });
 
@@ -1129,7 +1204,7 @@ async function sendDirectEmail() {
             button.disabled = false;
             button.textContent = "Approve & Send Email";
         }
-        showToast(`❌ ${friendlyNetworkError(error)}`, 5000);
+        showToast(error.message || "Email was not sent.");
     } finally {
         isSendingEmail = false;
     }
@@ -1372,7 +1447,7 @@ function updateNavUI() {
 
     if (currentUser) {
         navContainer.innerHTML = `
-            <div class="profile-menu-container" onmouseenter="toggleProfileDropdown(event, true)" onmouseleave="toggleProfileDropdown(event, false)">
+            <div class="profile-menu-container">
                 <div class="profile-badge" onclick="toggleProfileDropdown(event, true)">
                     <span>👤 ${escapeHTML(currentUser.name || "User")}</span>
                     <span style="font-size: 0.7rem; color: #94a3b8;">▼</span>
